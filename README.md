@@ -1,58 +1,89 @@
 # BtBatteryTray
 
-Небольшое приложение для Windows, которое показывает заряд подключённых Bluetooth-устройств в системном трее.
+Lightweight Windows tray application that displays battery levels reported by the Windows Bluetooth stack.
 
-Приложение работает без отдельного окна и не появляется в `Alt+Tab`.
+It is intended for devices such as Bluetooth headphones, speakers, mice, keyboards, game controllers, and other peripherals whose battery level is exposed to Windows.
 
-## Возможности
+## What it does
 
-- заряд Bluetooth-устройств;
-- отображение только подключённых устройств;
-- выбор устройства, заряд которого показывается на иконке;
-- тёмное меню;
-- запуск вместе с Windows;
-- один переносимый `.exe` без установки .NET или Rust.
+- polls Windows for Bluetooth devices with a reported battery level;
+- shows connected devices only;
+- displays the selected device's level in the tray icon, or the lowest level automatically;
+- shows device names and levels in the tray tooltip;
+- warns about low battery;
+- provides a dark tray menu;
+- optionally starts with Windows;
+- runs without a regular window and does not appear in `Alt+Tab`;
+- is distributed as a standalone executable.
 
-## Скачать
+The default polling interval is 60 seconds. A manual refresh is available from the tray menu.
 
-Готовая версия находится во вкладке **Releases** справа на странице репозитория.
+## Download
 
-Скачайте `BtBatteryTray.exe` и запустите его. Дополнительные DLL и папки не нужны.
+Download the latest `BtBatteryTray.exe` from [Releases](https://github.com/ProfessorSovers/btbatterytrey/releases).
 
-Windows может показать предупреждение SmartScreen для первого запуска. Это ожидаемо для небольшого приложения без платной цифровой подписи: проверяйте файл, скачанный со страницы Releases этого репозитория.
+The application is portable: no installer, .NET runtime, Rust installation, DLLs, or additional folders are required. Copy the executable to any convenient folder and run it.
 
-## Использование
+Windows SmartScreen may show a warning because the executable is not digitally signed. This is common for small independently distributed Windows applications. Download the file only from this repository's Releases page.
 
-1. Запустите `BtBatteryTray.exe`.
-2. Нажмите правой кнопкой по значку приложения в трее.
-3. В пункте выбора цели укажите устройство для иконки или оставьте автоматический режим.
-4. Автозапуск включается там же.
+## Usage
 
-После запуска приложение создаёт настройки в реестре текущего пользователя и небольшой лог в `%LOCALAPPDATA%\\BtBatteryTray`.
+1. Run `BtBatteryTray.exe`.
+2. Open the tray menu by clicking the tray icon.
+3. Use **Target** to select the device whose level should be shown in the icon, or use automatic mode.
+4. Use **Refresh** to request an immediate update.
+5. Enable or disable Windows startup from the same menu.
+6. Select **Exit** to close the application.
 
-## Сборка из исходников
+The application stores its per-user settings in:
 
-Нужны:
+```text
+HKCU\Software\BtBatteryTray
+```
 
-- Windows 10 или новее;
-- Rust с Cargo: <https://rustup.rs/>.
+The diagnostic log is stored in:
+
+```text
+%LOCALAPPDATA%\BtBatteryTray\log.txt
+```
+
+The log is limited to approximately 200 KB and contains device names and battery levels observed by the application. No network service or telemetry is used.
+
+## Limitations
+
+Battery reporting depends on Windows, the Bluetooth adapter, the device, and its driver. A paired device may not appear if it is not connected. A connected device may also be absent when Windows does not expose its battery level.
+
+The application does not communicate with device vendors' cloud services and does not bypass Windows Bluetooth APIs.
+
+## Build from source
+
+Requirements:
+
+- Windows 10 or later;
+- Rust and Cargo: <https://rustup.rs/>.
+
+Build the release executable:
 
 ```text
 cargo build --release
 ```
 
-Готовый файл появится здесь:
+The executable is created at:
 
 ```text
-target\\release\\BtBatteryTray.exe
+target\release\BtBatteryTray.exe
 ```
 
-Для локальной сборки GNU-цепочкой может потребоваться собственный `.cargo/config.toml` с настройками линкера. Этот файл намеренно не входит в репозиторий: он зависит от конкретной машины.
+Run the test suite:
 
-## Технические ограничения
+```text
+cargo test --locked
+```
 
-Приложение читает заряд, который Windows публикует через Bluetooth-стек. Если конкретное устройство или его драйвер не передаёт уровень заряда Windows, приложение не сможет его показать.
+## License
 
-## Лицензия
+MIT. See [LICENSE](LICENSE).
 
-Лицензия будет добавлена перед первой публичной публикацией.
+## Status
+
+The application is developed and tested on Windows 10. Hardware support depends on whether Windows exposes a battery level for the particular Bluetooth device.
