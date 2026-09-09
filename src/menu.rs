@@ -16,7 +16,7 @@ use windows::Win32::Graphics::Gdi::{
     CreateFontW, CreatePen, CreateSolidBrush, DeleteDC, DeleteObject, DIB_RGB_COLORS, DrawTextW,
     DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, Ellipse, EndPaint, FillRect, GetDC, GetStockObject,
     GetTextExtentPoint32W, HBRUSH, HDC, HFONT, InvalidateRect, LineTo, MoveToEx, NULL_BRUSH,
-    PAINTSTRUCT, PS_SOLID, Rectangle, ReleaseDC, RGBQUAD, SelectObject, SetBkMode, SetTextColor,
+    PAINTSTRUCT, Polygon, PS_SOLID, Rectangle, ReleaseDC, RGBQUAD, SelectObject, SetBkMode, SetTextColor,
     TRANSPARENT, UpdateWindow,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -28,7 +28,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     RegisterClassW, SetCursor, SetTimer, SetWindowsHookExW, SetWindowLongPtrW, SetWindowPos,
     ShowWindow, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOWNA,
     TranslateMessage, UnhookWindowsHookEx, WH_MOUSE_LL,
-    WindowFromPoint, WNDCLASSW, WM_APP, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN,
+    WindowFromPoint, WNDCLASSW, WM_ACTIVATE, WM_APP, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
     WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER,
     WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
@@ -245,17 +245,19 @@ const WM_TRAY: u32 = WM_APP + 1; // клик по иконке трея (как 
 const WM_HOOK_CLOSE: u32 = WM_APP + 9; // хук мыши: клик вне меню → закрыть
 const SUBMENU_HOVER_TIMER: usize = 0x52; // таймер открытия подменю при наведении
 const SUBMENU_HOVER_MS: u32 = 300; // задержка как у нативных меню (MenuShowDelay)
+const FOCUS_CHECK_TIMER: usize = 0x53;
 
 // Хук мыши (WH_MOUSE_LL) — единственный надёжный способ закрывать меню по клику вне
 // окна: захват мыши (SetCapture) на этой системе не редиректит клики в меню.
 static HOOK_HANDLE: AtomicIsize = AtomicIsize::new(0);
 static HOOK_HWND: AtomicIsize = AtomicIsize::new(0);
 static HOOK_CHILD_HWND: AtomicIsize = AtomicIsize::new(0);
+static MENU_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code >= 0 {
         let msg = wparam.0 as u32;
-        if matches!(msg, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN) {
+        if matches!(msg, WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN) {
             let hwnd = HOOK_HWND.load(Ordering::SeqCst);
             if hwnd != 0 {
                 let mut pt = POINT::default();
@@ -468,7 +470,7 @@ unsafe fn draw_radio(hdc: HDC, cx: i32, cy: i32, checked: bool, color: COLORREF)
         // точка внутри
         let br = CreateSolidBrush(color);
         let old2 = SelectObject(hdc, br);
-        let _ = Ellipse(hdc, cx - 2, cy - 2, cx + 3, cy + 3);
+        let _ = Ellipse(hdc, cx - 2, cy - 2, cx + 2, cy + 2);
         let _ = SelectObject(hdc, old2);
         let _ = DeleteObject(br);
     }
@@ -495,15 +497,18 @@ unsafe fn draw_check(hdc: HDC, cx: i32, cy: i32, checked: bool, color: COLORREF)
     let _ = DeleteObject(pen);
 }
 
-/// Стрелка «▸» для пункта с подменю.
+/// Заполненный треугольник, направленный влево — в сторону дочернего меню.
 unsafe fn draw_arrow(hdc: HDC, cx: i32, cy: i32, color: COLORREF) {
-    let pen = CreatePen(PS_SOLID, 1, color);
-    let old_pen = SelectObject(hdc, pen);
-    let _ = MoveToEx(hdc, cx - 3, cy - 4, None);
-    let _ = LineTo(hdc, cx + 3, cy);
-    let _ = LineTo(hdc, cx - 3, cy + 4);
-    let _ = SelectObject(hdc, old_pen);
-    let _ = DeleteObject(pen);
+    let brush = CreateSolidBrush(color);
+    let old_brush = SelectObject(hdc, brush);
+    let points = [
+        POINT { x: cx + 3, y: cy - 5 },
+        POINT { x: cx - 3, y: cy },
+        POINT { x: cx + 3, y: cy + 5 },
+    ];
+    let _ = Polygon(hdc, &points);
+    let _ = SelectObject(hdc, old_brush);
+    let _ = DeleteObject(brush);
 }
 
 /// Рисует всё меню в hdc. hover: индекс подсвеченного пункта (−1 = нет).
@@ -554,7 +559,7 @@ unsafe fn paint_menu(hdc: HDC, items: &[MenuItem], hover: i32, font: HFONT, widt
         let item_color = if it.kind == ItemKind::Info { colors.disabled } else { colors.text };
 
         let mut text_rect = rect;
-        text_rect.left += GLYPH_ZONE;
+        text_rect.left += if matches!(it.kind, ItemKind::Info) { TEXT_PAD } else { GLYPH_ZONE };
         text_rect.right -= TEXT_PAD;
         let mut buf = to_utf16(&it.text);
         let _ = SetTextColor(hdc, item_color);
@@ -650,6 +655,20 @@ unsafe extern "system" fn menu_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
     let state = &mut *(userdata as *mut MenuState);
 
     match msg {
+        WM_ACTIVATE => {
+            if wparam.0 == 0 { close_menu(hwnd, state, MenuAction::None); }
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 as usize == FOCUS_CHECK_TIMER => {
+            let mut pt = POINT::default();
+            let _ = GetCursorPos(&mut pt);
+            let under = WindowFromPoint(pt);
+            let child = HOOK_CHILD_HWND.load(Ordering::SeqCst);
+            if under.0 as isize != hwnd.0 as isize && under.0 as isize != child {
+                close_menu(hwnd, state, MenuAction::None);
+            }
+            LRESULT(0)
+        }
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize), // 3 — не активировать
         WM_ERASEBKGND => LRESULT(1), // фон рисуем в WM_PAINT целиком
         WM_SETCURSOR => {
@@ -668,6 +687,10 @@ unsafe extern "system" fn menu_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
         }
         WM_MOUSEMOVE => {
             let (x, y) = client_pos(lparam);
+            if x < 0 || y < 0 || x >= state.width || y >= state.height {
+                close_menu(hwnd, state, MenuAction::None);
+                return LRESULT(0);
+            }
             let hover = if x < 0 || y < 0 || x >= state.width || y >= state.height {
                 -1
             } else {
@@ -714,7 +737,6 @@ unsafe extern "system" fn menu_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
                         // открыть вложенное меню (продолжит run_menu)
                         state.open_submenu = item.submenu;
                         state.submenu_top = item_top(&state.items, idx as usize);
-                        suspend_menu(hwnd, state);
                         return LRESULT(0);
                     }
                     item.action.clone()
@@ -853,21 +875,11 @@ unsafe fn create_popup(items: Vec<MenuItem>, x: i32, y: i32, theme: Theme) -> Po
     let state_ptr: *mut MenuState = &mut *state;
     let _ = SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr as isize);
 
-    // показ без активации + хук мыши для закрытия по клику вне окна
+    // Показ без активации. Единственный глобальный хук принадлежит run_menu;
+    // создание дочернего popup не должно перезаписывать HWND родителя.
     let _ = ShowWindow(hwnd, SW_SHOWNA);
+    let _ = SetTimer(hwnd, FOCUS_CHECK_TIMER, 100, None);
     let _ = UpdateWindow(hwnd);
-    if HOOK_HANDLE.load(Ordering::SeqCst) == 0 {
-        let hook = SetWindowsHookExW(
-            WH_MOUSE_LL,
-            Some(mouse_hook),
-            None,
-            0, // текущий поток
-        );
-        if let Ok(h) = hook {
-            HOOK_HANDLE.store(h.0 as isize, Ordering::SeqCst);
-            HOOK_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
-        }
-    }
 
     PopupResult {
         action: MenuAction::None,
@@ -895,12 +907,18 @@ unsafe fn destroy_kept_popup(mut popup: PopupResult) {
 /// Показывает тёмное меню у курсора, ждёт выбора (вложенный цикл сообщений).
 /// Возвращает действие; None — меню закрыто без выбора.
 pub fn run_menu(devices: &[DeviceBattery], target: &str, target_name: &str, autostart: bool, language: Language, theme: Theme) -> MenuAction {
+    if MENU_ACTIVE.swap(true, Ordering::SeqCst) {
+        return MenuAction::None;
+    }
     let updated = chrono::Local::now().format("%H:%M:%S").to_string();
     let items = build_items(devices, target, target_name, autostart, &updated, language);
     unsafe {
         let mut pt = POINT::default(); let _ = GetCursorPos(&mut pt);
         let mut parent = create_popup(items, pt.x - 4, pt.y - 4, theme);
-        let Some(parent_hwnd) = parent.window else { return MenuAction::None; };
+        let Some(parent_hwnd) = parent.window else {
+            MENU_ACTIVE.store(false, Ordering::SeqCst);
+            return MenuAction::None;
+        };
         let parent_state = parent.state.as_mut().unwrap();
         let hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), None, 0);
         if let Ok(h) = hook { HOOK_HANDLE.store(h.0 as isize, Ordering::SeqCst); HOOK_HWND.store(parent_hwnd.0 as isize, Ordering::SeqCst); }
@@ -909,12 +927,21 @@ pub fn run_menu(devices: &[DeviceBattery], target: &str, target_name: &str, auto
             let ok=GetMessageW(&mut msg,None,0,0); if !ok.as_bool(){break;}
             let ph=parent.window; let ch=child.as_ref().and_then(|p|p.window);
             if msg.message==WM_KEYDOWN && msg.wParam.0 as u32==VK_ESCAPE.0 as u32 {break;}
-            if Some(msg.hwnd)==ph || Some(msg.hwnd)==ch { let _=TranslateMessage(&msg); DispatchMessageW(&msg); }
-            else if msg.message==WM_MOUSEMOVE { }
-            else if matches!(msg.message, WM_LBUTTONDOWN|WM_LBUTTONUP|WM_RBUTTONDOWN|WM_RBUTTONUP|WM_MBUTTONDOWN|WM_MBUTTONUP|WM_MOUSEWHEEL|WM_TRAY) {break;}
+            // Dispatch menu-owned mouse messages first. In particular, do not let the
+            // outer loop consume WM_LBUTTONDOWN before menu_wnd_proc can suspend the
+            // parent and publish open_submenu for the child-popup step below.
+            if Some(msg.hwnd)==ph || Some(msg.hwnd)==ch {
+                let _=TranslateMessage(&msg); DispatchMessageW(&msg);
+            } else if msg.message==WM_MOUSEMOVE {
+            } else if matches!(msg.message, WM_LBUTTONDOWN|WM_LBUTTONUP|WM_RBUTTONDOWN|WM_RBUTTONUP|WM_MBUTTONDOWN|WM_MBUTTONUP|WM_MOUSEWHEEL|WM_TRAY) {break;}
             else { let _=TranslateMessage(&msg); DispatchMessageW(&msg); }
-            if parent_state.done {result=parent_state.result.clone();break;}
-            if child.is_none() && parent_state.open_submenu.is_some() {
+            if parent_state.open_submenu.is_some() {
+                // The parent can request a different submenu while the old child is
+                // still alive. Replace it immediately so only one child popup exists.
+                if let Some(old_child) = child.take() {
+                    HOOK_CHILD_HWND.store(0, Ordering::SeqCst);
+                    destroy_kept_popup(old_child);
+                }
                 let kind=parent_state.open_submenu.take().unwrap();
                 let sub_items=match kind {SubmenuKind::Target=>build_target_items(devices,target,language),SubmenuKind::Language=>build_language_items(language),SubmenuKind::Theme=>build_theme_items(language,theme)};
                 let screen=GetDC(None); let font=create_menu_font(); let (sw,sh)=measure(&sub_items,screen,font); let _=ReleaseDC(None,screen); let _=DeleteObject(font);
@@ -924,10 +951,13 @@ pub fn run_menu(devices: &[DeviceBattery], target: &str, target_name: &str, auto
                 child=Some(create_popup(sub_items,parent.x-sw,sy,theme));
                 HOOK_CHILD_HWND.store(child.as_ref().and_then(|p| p.window).map(|h| h.0 as isize).unwrap_or(0), Ordering::SeqCst);
             }
+            if parent_state.done && child.is_none() {result=parent_state.result.clone();break;}
             if let Some(c)=child.as_mut() {if let Some(st)=c.state.as_mut(){if st.done {result=st.result.clone();break;}}}
         }
         if let Some(c)=child {destroy_kept_popup(c);} destroy_kept_popup(parent);
-        let hook=HOOK_HANDLE.swap(0,Ordering::SeqCst); HOOK_HWND.store(0,Ordering::SeqCst); if hook!=0 {let _=UnhookWindowsHookEx(HHOOK(hook as *mut core::ffi::c_void));} result
+        let hook=HOOK_HANDLE.swap(0,Ordering::SeqCst); HOOK_HWND.store(0,Ordering::SeqCst); HOOK_CHILD_HWND.store(0,Ordering::SeqCst); if hook!=0 {let _=UnhookWindowsHookEx(HHOOK(hook as *mut core::ffi::c_void));}
+        MENU_ACTIVE.store(false, Ordering::SeqCst);
+        result
     }
 }
 
