@@ -24,7 +24,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
     GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GWLP_USERDATA, HCURSOR, HHOOK, HICON, HMENU,
-    IDC_ARROW, KillTimer, LoadCursorW, MA_NOACTIVATE, MSG, PostMessageW, PostQuitMessage,
+    IDC_ARROW, KillTimer, LoadCursorW, MA_NOACTIVATE, MSG, PostMessageW,
     RegisterClassW, SetCursor, SetTimer, SetWindowsHookExW, SetWindowLongPtrW, SetWindowPos,
     ShowWindow, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOWNA,
     TranslateMessage, UnhookWindowsHookEx, WH_MOUSE_LL,
@@ -250,6 +250,7 @@ const SUBMENU_HOVER_MS: u32 = 300; // задержка как у нативны�
 // окна: захват мыши (SetCapture) на этой системе не редиректит клики в меню.
 static HOOK_HANDLE: AtomicIsize = AtomicIsize::new(0);
 static HOOK_HWND: AtomicIsize = AtomicIsize::new(0);
+static HOOK_CHILD_HWND: AtomicIsize = AtomicIsize::new(0);
 
 unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code >= 0 {
@@ -260,8 +261,9 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 let mut pt = POINT::default();
                 let _ = GetCursorPos(&mut pt);
                 let under = WindowFromPoint(pt);
-                if under.0 as isize != hwnd {
-                    // клик вне окна меню — попросить меню закрыться
+                let child = HOOK_CHILD_HWND.load(Ordering::SeqCst);
+                if under.0 as isize != hwnd && under.0 as isize != child {
+                    // клик вне обоих окон меню — попросить меню закрыться
                     let _ = PostMessageW(
                         HWND(hwnd as *mut core::ffi::c_void),
                         WM_HOOK_CLOSE,
@@ -756,7 +758,7 @@ struct PopupResult {
 
 /// Показывает попап с пунктами у (x, y), ждёт выбора (вложенный цикл сообщений).
 /// Возвращает действие и итоговую геометрию окна (для позиционирования подменю).
-unsafe fn show_popup(items: Vec<MenuItem>, x: i32, y: i32, theme: Theme) -> PopupResult {
+unsafe fn create_popup(items: Vec<MenuItem>, x: i32, y: i32, theme: Theme) -> PopupResult {
     let empty = PopupResult {
         action: MenuAction::None,
         open_submenu: None,
@@ -867,75 +869,14 @@ unsafe fn show_popup(items: Vec<MenuItem>, x: i32, y: i32, theme: Theme) -> Popu
         }
     }
 
-    // вложенный цикл сообщений до закрытия
-    let state_ref = &mut *state_ptr;
-    let mut msg = MSG::default();
-    let mut got_quit = false;
-    while !state_ref.done {
-        let ok = GetMessageW(&mut msg, None, 0, 0);
-        if !ok.as_bool() {
-            // WM_QUIT — передать дальше, в главный цикл
-            got_quit = true;
-            break;
-        }
-        // ESC в любом окне потока — закрыть без выбора
-        if msg.message == WM_KEYDOWN && msg.wParam.0 as u32 == VK_ESCAPE.0 as u32 {
-            close_menu(hwnd, state_ref, MenuAction::None);
-            break;
-        }
-        if msg.hwnd == hwnd {
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        } else if matches!(
-            msg.message,
-            WM_LBUTTONDOWN
-                | WM_LBUTTONUP
-                | WM_RBUTTONDOWN
-                | WM_RBUTTONUP
-                | WM_MBUTTONDOWN
-                | WM_MBUTTONUP
-                | WM_MOUSEMOVE
-                | WM_MOUSEWHEEL
-                | WM_TRAY
-        ) {
-            // мышь/трей вне нашего окна — закрыть без выбора
-            close_menu(hwnd, state_ref, MenuAction::None);
-        } else {
-            // WM_TIMER / WM_REFRESH и пр. — обычный диспатч в окно-получатель
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
+    PopupResult {
+        action: MenuAction::None,
+        open_submenu: None,
+        submenu_top: 1,
+        x, y, width,
+        window: Some(hwnd),
+        state: Some(state),
     }
-
-    if got_quit {
-        PostQuitMessage(msg.wParam.0 as i32);
-    }
-    if !state_ref.done {
-        // цикл завершён без выбора (например, WM_QUIT) — закрыть окно
-        close_menu(hwnd, state_ref, MenuAction::None);
-    }
-
-    let result = std::mem::replace(&mut state_ref.result, MenuAction::None);
-    let open_submenu = state_ref.open_submenu;
-    let submenu_top = state_ref.submenu_top;
-    let font = state_ref.font;
-    if open_submenu.is_some() {
-        return PopupResult {
-            action: result,
-            open_submenu,
-            submenu_top,
-            x,
-            y,
-            width,
-            window: Some(hwnd),
-            state: Some(state),
-        };
-    }
-    drop(state);
-    // шрифт больше никому не нужен: HFONT не имеет Drop — без явного удаления
-    // утекает GDI-объект при каждом открытии меню (лимит процесса ~10 000)
-    let _ = DeleteObject(font);
-    PopupResult { action: result, open_submenu, submenu_top, x, y, width, window: None, state: None }
 }
 
 unsafe fn destroy_kept_popup(mut popup: PopupResult) {
@@ -956,57 +897,36 @@ unsafe fn destroy_kept_popup(mut popup: PopupResult) {
 pub fn run_menu(devices: &[DeviceBattery], target: &str, target_name: &str, autostart: bool, language: Language, theme: Theme) -> MenuAction {
     let updated = chrono::Local::now().format("%H:%M:%S").to_string();
     let items = build_items(devices, target, target_name, autostart, &updated, language);
-
     unsafe {
-        let mut pt = POINT::default();
-        let _ = GetCursorPos(&mut pt);
-        let mut main = show_popup(items, pt.x - 4, pt.y - 4, theme);
-        let Some(submenu) = main.open_submenu else { return main.action; };
-
-        let sub_items = match submenu {
-            SubmenuKind::Target => build_target_items(devices, target, language),
-            SubmenuKind::Language => build_language_items(language),
-            SubmenuKind::Theme => build_theme_items(language, theme),
-        };
-        let screen = GetDC(None);
-        let font = create_menu_font();
-        let (sub_w, sub_h) = measure(&sub_items, screen, font);
-        let _ = ReleaseDC(None, screen);
-        let _ = DeleteObject(font);
-
-        let sw = GetSystemMetrics(SM_CXSCREEN);
-        let sh = GetSystemMetrics(SM_CYSCREEN);
-        let max_parent_x = (sw - main.width).max(0);
-        if main.x < sub_w {
-            let parent_x = sub_w.min(max_parent_x);
-            if parent_x != main.x {
-                if let Some(hwnd) = main.window {
-                    let _ = SetWindowPos(
-                        hwnd,
-                        HWND::default(),
-                        parent_x,
-                        main.y,
-                        0,
-                        0,
-                        SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOZORDER,
-                    );
-                }
-                main.x = parent_x;
+        let mut pt = POINT::default(); let _ = GetCursorPos(&mut pt);
+        let mut parent = create_popup(items, pt.x - 4, pt.y - 4, theme);
+        let Some(parent_hwnd) = parent.window else { return MenuAction::None; };
+        let parent_state = parent.state.as_mut().unwrap();
+        let hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), None, 0);
+        if let Ok(h) = hook { HOOK_HANDLE.store(h.0 as isize, Ordering::SeqCst); HOOK_HWND.store(parent_hwnd.0 as isize, Ordering::SeqCst); }
+        let mut child: Option<PopupResult> = None; let mut result = MenuAction::None; let mut msg=MSG::default();
+        loop {
+            let ok=GetMessageW(&mut msg,None,0,0); if !ok.as_bool(){break;}
+            let ph=parent.window; let ch=child.as_ref().and_then(|p|p.window);
+            if msg.message==WM_KEYDOWN && msg.wParam.0 as u32==VK_ESCAPE.0 as u32 {break;}
+            if Some(msg.hwnd)==ph || Some(msg.hwnd)==ch { let _=TranslateMessage(&msg); DispatchMessageW(&msg); }
+            else if msg.message==WM_MOUSEMOVE { }
+            else if matches!(msg.message, WM_LBUTTONDOWN|WM_LBUTTONUP|WM_RBUTTONDOWN|WM_RBUTTONUP|WM_MBUTTONDOWN|WM_MBUTTONUP|WM_MOUSEWHEEL|WM_TRAY) {break;}
+            else { let _=TranslateMessage(&msg); DispatchMessageW(&msg); }
+            if parent_state.done {result=parent_state.result.clone();break;}
+            if child.is_none() && parent_state.open_submenu.is_some() {
+                let kind=parent_state.open_submenu.take().unwrap();
+                let sub_items=match kind {SubmenuKind::Target=>build_target_items(devices,target,language),SubmenuKind::Language=>build_language_items(language),SubmenuKind::Theme=>build_theme_items(language,theme)};
+                let screen=GetDC(None); let font=create_menu_font(); let (sw,sh)=measure(&sub_items,screen,font); let _=ReleaseDC(None,screen); let _=DeleteObject(font);
+                let max_x=(GetSystemMetrics(SM_CXSCREEN)-parent.width).max(0); let px=parent.x.max(sw).min(max_x);
+                if px!=parent.x {let _=SetWindowPos(parent_hwnd,HWND::default(),px,parent.y,0,0,SWP_NOACTIVATE|SWP_NOSIZE|SWP_NOZORDER);parent.x=px;}
+                let sy=(parent.y+parent_state.submenu_top-1).min((GetSystemMetrics(SM_CYSCREEN)-sh).max(0));
+                child=Some(create_popup(sub_items,parent.x-sw,sy,theme));
             }
+            if let Some(c)=child.as_mut() {if let Some(st)=c.state.as_mut(){if st.done {result=st.result.clone();break;}}}
         }
-        let sub_x = main.x - sub_w;
-        let mut sub_y = main.y + main.submenu_top - 1;
-        if sub_y + sub_h > sh {
-            sub_y = sh - sub_h;
-        }
-        if sub_y < 0 {
-            sub_y = 0;
-        }
-
-        let sub = show_popup(sub_items, sub_x, sub_y, theme);
-        let action = sub.action;
-        destroy_kept_popup(main);
-        action
+        if let Some(c)=child {destroy_kept_popup(c);} destroy_kept_popup(parent);
+        let hook=HOOK_HANDLE.swap(0,Ordering::SeqCst); HOOK_HWND.store(0,Ordering::SeqCst); if hook!=0 {let _=UnhookWindowsHookEx(HHOOK(hook as *mut core::ffi::c_void));} result
     }
 }
 
