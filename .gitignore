@@ -1,0 +1,16 @@
+# Rust build output
+/target/
+
+# Local machine-specific Cargo linker configuration
+/.cargo/config.toml
+
+# Local diagnostics and render artifacts
+*.log
+*.bmp
+*.ps1
+check.log
+
+# IDE/editor files
+.vscode/
+.idea/
+*.swp
