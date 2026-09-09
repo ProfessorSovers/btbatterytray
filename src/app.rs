@@ -28,7 +28,7 @@ use winreg::RegKey;
 use crate::battery::{get_devices_with_battery, DeviceBattery};
 use crate::conn::get_connected_addresses;
 use crate::icon::TrayIcon;
-use crate::menu::{run_menu, MenuAction};
+use crate::menu::{localized_device_name, low_battery_message, low_battery_title, run_menu, tooltip_empty, tray_tooltip, Language, MenuAction, Theme};
 
 const APP_NAME: &str = "BtBatteryTray";
 const SETTINGS_KEY: &str = r"Software\BtBatteryTray";
@@ -88,6 +88,34 @@ fn to_wide<const N: usize>(s: &str) -> [u16; N] {
 
 // ---------- настройки (реестр) ----------
 
+fn load_language() -> Language {
+    RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey(SETTINGS_KEY)
+        .and_then(|k| k.get_value::<String, _>("Language"))
+        .map(|v| Language::from_registry(&v))
+        .unwrap_or(Language::English)
+}
+
+fn save_language(language: Language) {
+    if let Ok((k, _)) = RegKey::predef(HKEY_CURRENT_USER).create_subkey(SETTINGS_KEY) {
+        let _ = k.set_value("Language", &language.registry_value());
+    }
+}
+
+fn load_theme() -> Theme {
+    RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey(SETTINGS_KEY)
+        .and_then(|k| k.get_value::<String, _>("Theme"))
+        .map(|v| Theme::from_registry(&v))
+        .unwrap_or(Theme::Dark)
+}
+
+fn save_theme(theme: Theme) {
+    if let Ok((k, _)) = RegKey::predef(HKEY_CURRENT_USER).create_subkey(SETTINGS_KEY) {
+        let _ = k.set_value("Theme", &theme.registry_value());
+    }
+}
+
 fn load_target() -> String {
     RegKey::predef(HKEY_CURRENT_USER)
         .open_subkey(SETTINGS_KEY)
@@ -139,9 +167,9 @@ fn toggle_autostart() {
 
 // ---------- состояние и обновление ----------
 
-fn build_tooltip(devices: &[DeviceBattery], target: &str) -> String {
+fn build_tooltip(devices: &[DeviceBattery], target: &str, language: Language) -> String {
     if devices.is_empty() {
-        return "Подключённых устройств с зарядом нет".to_string();
+        return tooltip_empty(language).to_string();
     }
     let mut ordered: Vec<&DeviceBattery> = devices.iter().collect();
     ordered.sort_by(|a, b| {
@@ -152,7 +180,7 @@ fn build_tooltip(devices: &[DeviceBattery], target: &str) -> String {
     });
     let text = ordered
         .iter()
-        .map(|d| format!("{}: {}%", d.name, d.level))
+        .map(|d| format!("{}: {}%", localized_device_name(language, &d.name), d.level))
         .collect::<Vec<_>>()
         .join("\n");
     // лимит szTip: 128 UTF-16 единиц (последняя — терминатор). Резать можно только
@@ -197,8 +225,8 @@ fn update_tray_icon_and_tip(hwnd: HWND, hicon: HICON, tooltip: &str) {
     }
 }
 
-fn show_balloon(hwnd: HWND, name: &str, level: u8) {
-    let info = format!("{}: {}% — пора зарядить.", name, level);
+fn show_balloon(hwnd: HWND, name: &str, level: u8, language: Language) {
+    let info = low_battery_message(language, name, level);
     let nid = NOTIFYICONDATAW {
         cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
         hWnd: hwnd,
@@ -208,7 +236,7 @@ fn show_balloon(hwnd: HWND, name: &str, level: u8) {
         hIcon: Default::default(),
         szTip: [0; 128],
         szInfo: to_wide(&info),
-        szInfoTitle: to_wide("Низкий заряд"),
+        szInfoTitle: to_wide(low_battery_title(language)),
         dwInfoFlags: NIIF_WARNING,
         ..Default::default()
     };
@@ -220,9 +248,10 @@ fn show_balloon(hwnd: HWND, name: &str, level: u8) {
 /// GUI-поток: применил свежие данные от worker'а (иконка, тултип, баллун, лог).
 fn ui_refresh(hwnd: HWND) {
     let devices = LAST_DEVICES.lock().unwrap().clone();
+    let language = load_language();
     let target = load_target();
     let shown = compute_shown(&devices, &target);
-    let tooltip = build_tooltip(&devices, &target);
+    let tooltip = build_tooltip(&devices, &target, language);
 
     // запомнить имя цели (для меню, когда устройство отключено)
     if !target.is_empty() {
@@ -271,11 +300,11 @@ fn ui_refresh(hwnd: HWND) {
     drop(old_icon); // старую иконку удаляем после обновления трея
 
     if let Some((name, level)) = balloon {
-        show_balloon(hwnd, &name, level);
+        show_balloon(hwnd, &name, level, language);
     }
 
     let summary = if devices.is_empty() {
-        "нет подключённых устройств с зарядом".to_string()
+        tooltip_empty(language).to_string()
     } else {
         devices
             .iter()
@@ -284,14 +313,26 @@ fn ui_refresh(hwnd: HWND) {
             .join("; ")
     };
     let icon_info = match shown {
-        None => "нет данных".to_string(),
+        None => match language {
+            Language::English => "no data".to_string(),
+            Language::Russian => "нет данных".to_string(),
+            Language::Ukrainian => "немає даних".to_string(),
+        },
         Some(v) => {
             let t = devices
                 .iter()
                 .find(|d| !target.is_empty() && d.address.eq_ignore_ascii_case(&target));
             match t {
-                Some(d) => format!("цель {}={}%", d.name, v),
-                None => format!("мин {}%", v),
+                Some(d) => format!("{} {}={}%", match language {
+                    Language::English => "target",
+                    Language::Russian => "цель",
+                    Language::Ukrainian => "ціль",
+                }, d.name, v),
+                None => format!("{} {}%", match language {
+                    Language::English => "min",
+                    Language::Russian => "мин",
+                    Language::Ukrainian => "мін",
+                }, v),
             }
         }
     };
@@ -329,8 +370,8 @@ fn worker_loop(hwnd: HWND) {
 
 // ---------- меню ----------
 
-fn on_tray_menu() {
-    let (devices, target, target_name, autostart) = {
+fn on_tray_menu(hwnd: HWND) {
+    let (devices, target, target_name, autostart, language, theme) = {
         let guard = STATE.lock().unwrap();
         let s = match guard.as_ref() {
             Some(s) => s,
@@ -341,10 +382,12 @@ fn on_tray_menu() {
             load_target(),
             load_target_name(),
             autostart_enabled(),
+            load_language(),
+            load_theme(),
         )
     };
 
-    let action = run_menu(&devices, &target, &target_name, autostart);
+    let action = run_menu(&devices, &target, &target_name, autostart, language, theme);
     match action {
         MenuAction::Exit => {
             unsafe {
@@ -357,6 +400,14 @@ fn on_tray_menu() {
         MenuAction::SetTarget(addr) => {
             save_target(&addr);
             REFRESH_NOW.store(true, Ordering::SeqCst);
+        }
+        MenuAction::SetLanguage(language) => {
+            save_language(language);
+            ui_refresh(hwnd);
+        }
+        MenuAction::SetTheme(theme) => {
+            save_theme(theme);
+            ui_refresh(hwnd);
         }
         MenuAction::ToggleAutostart => toggle_autostart(),
         MenuAction::None => {}
@@ -371,7 +422,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             let code = (lparam.0 & 0xFFFF) as u32;
             match code {
                 // ЛКМ — как у обычных треевских приложений: открыть меню
-                WM_LBUTTONUP | WM_RBUTTONUP | WM_CONTEXTMENU => on_tray_menu(),
+                WM_LBUTTONUP | WM_RBUTTONUP | WM_CONTEXTMENU => on_tray_menu(hwnd),
                 _ => {}
             }
             LRESULT(0)
@@ -474,7 +525,7 @@ pub fn run() {
             uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
             uCallbackMessage: WM_TRAY,
             hIcon: icon.hicon(),
-            szTip: to_wide("Заряд Bluetooth-устройств"),
+            szTip: to_wide(tray_tooltip(load_language())),
             ..Default::default()
         };
         let _ = Shell_NotifyIconW(NIM_ADD, &nid);

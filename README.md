@@ -12,7 +12,8 @@ It is intended for devices such as Bluetooth headphones, speakers, mice, keyboar
 - displays the selected device's level in the tray icon, or the lowest level automatically;
 - shows device names and levels in the tray tooltip;
 - warns about low battery;
-- provides a dark tray menu;
+- provides dark and light tray themes;
+- supports English, Russian, and Ukrainian interface languages;
 - optionally starts with Windows;
 - runs without a regular window and does not appear in `Alt+Tab`;
 - is distributed as a standalone executable.

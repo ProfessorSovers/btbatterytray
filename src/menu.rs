@@ -40,17 +40,203 @@ pub enum MenuAction {
     None,
     Refresh,
     SetTarget(String), // адрес или "" (авто)
+    SetLanguage(Language),
+    SetTheme(Theme),
     ToggleAutostart,
     Exit,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Language {
+    English,
+    Russian,
+    Ukrainian,
+}
+
+impl Language {
+    pub fn from_registry(value: &str) -> Self {
+        match value {
+            "ru" => Self::Russian,
+            "uk" => Self::Ukrainian,
+            _ => Self::English,
+        }
+    }
+
+    pub fn registry_value(self) -> &'static str {
+        match self {
+            Self::English => "en",
+            Self::Russian => "ru",
+            Self::Ukrainian => "uk",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Theme {
+    Dark,
+    Light,
+}
+
+impl Theme {
+    pub fn from_registry(value: &str) -> Self {
+        if value == "light" {
+            Self::Light
+        } else {
+            Self::Dark
+        }
+    }
+
+    pub fn registry_value(self) -> &'static str {
+        match self {
+            Self::Dark => "dark",
+            Self::Light => "light",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubmenuKind {
+    Target,
+    Language,
+    Theme,
+}
+
+fn fallback_device_name(language: Language) -> &'static str {
+    match language {
+        Language::English => "Bluetooth device",
+        Language::Russian => "Bluetooth-устройство",
+        Language::Ukrainian => "Bluetooth-пристрій",
+    }
+}
+
+fn device_name(language: Language, name: &str) -> &str {
+    match name {
+        "Bluetooth device" | "Bluetooth-устройство" | "Bluetooth-пристрій" => fallback_device_name(language),
+        _ => name,
+    }
+}
+
+pub fn localized_device_name(language: Language, name: &str) -> &str {
+    device_name(language, name)
+}
+
+fn text(language: Language, key: &str) -> &'static str {
+    match (language, key) {
+        (Language::English, "updated") => "Updated",
+        (Language::Russian, "updated") => "Обновлено",
+        (Language::Ukrainian, "updated") => "Оновлено",
+        (Language::English, "no_devices") => "No connected devices",
+        (Language::Russian, "no_devices") => "Подключённых устройств нет",
+        (Language::Ukrainian, "no_devices") => "Підключених пристроїв немає",
+        (Language::English, "target") => "Target",
+        (Language::Russian, "target") => "Цель",
+        (Language::Ukrainian, "target") => "Ціль",
+        (Language::English, "auto") => "Auto (lowest battery)",
+        (Language::Russian, "auto") => "Авто (самое разряженное)",
+        (Language::Ukrainian, "auto") => "Авто (найменший заряд)",
+        (Language::English, "not_connected") => "not connected",
+        (Language::Russian, "not_connected") => "не подключено",
+        (Language::Ukrainian, "not_connected") => "не підключено",
+        (Language::English, "refresh") => "Refresh now",
+        (Language::Russian, "refresh") => "Обновить сейчас",
+        (Language::Ukrainian, "refresh") => "Оновити зараз",
+        (Language::English, "autostart") => "Start with Windows",
+        (Language::Russian, "autostart") => "Автозапуск",
+        (Language::Ukrainian, "autostart") => "Автозапуск",
+        (Language::English, "language") => "Language",
+        (Language::Russian, "language") => "Язык",
+        (Language::Ukrainian, "language") => "Мова",
+        (Language::English, "theme") => "Theme",
+        (Language::Russian, "theme") => "Тема",
+        (Language::Ukrainian, "theme") => "Тема",
+        (Language::English, "english") => "English",
+        (Language::Russian, "english") => "Английский",
+        (Language::Ukrainian, "english") => "Англійська",
+        (Language::English, "russian") => "Russian",
+        (Language::Russian, "russian") => "Русский",
+        (Language::Ukrainian, "russian") => "Російська",
+        (Language::English, "ukrainian") => "Ukrainian",
+        (Language::Russian, "ukrainian") => "Украинский",
+        (Language::Ukrainian, "ukrainian") => "Українська",
+        (Language::English, "dark") => "Dark",
+        (Language::Russian, "dark") => "Тёмная",
+        (Language::Ukrainian, "dark") => "Темна",
+        (Language::English, "light") => "Light",
+        (Language::Russian, "light") => "Светлая",
+        (Language::Ukrainian, "light") => "Світла",
+        (Language::English, "exit") => "Exit",
+        (Language::Russian, "exit") => "Выход",
+        (Language::Ukrainian, "exit") => "Вихід",
+        _ => "",
+    }
+}
+
+pub fn tray_tooltip(language: Language) -> &'static str {
+    match language {
+        Language::English => "Bluetooth device battery",
+        Language::Russian => "Заряд Bluetooth-устройств",
+        Language::Ukrainian => "Заряд Bluetooth-пристроїв",
+    }
+}
+
+pub fn tooltip_empty(language: Language) -> &'static str {
+    match language {
+        Language::English => "No connected devices with battery level",
+        Language::Russian => "Подключённых устройств с зарядом нет",
+        Language::Ukrainian => "Підключених пристроїв із зарядом немає",
+    }
+}
+
+pub fn low_battery_title(language: Language) -> &'static str {
+    match language {
+        Language::English => "Low battery",
+        Language::Russian => "Низкий заряд",
+        Language::Ukrainian => "Низький заряд",
+    }
+}
+
+pub fn low_battery_message(language: Language, name: &str, level: u8) -> String {
+    let message = match language {
+        Language::English => "time to charge",
+        Language::Russian => "пора зарядить",
+        Language::Ukrainian => "час зарядити",
+    };
+    format!("{}: {}% — {}.", device_name(language, name), level, message)
+}
+
 // ---------- палитра ----------
 
-const COL_BG: COLORREF = COLORREF(0x00202020); // #202020
-const COL_HOVER: COLORREF = COLORREF(0x00333333); // #333333
-const COL_BORDER: COLORREF = COLORREF(0x00454545); // #454545
-const COL_TEXT: COLORREF = COLORREF(0x00E8E8E8); // #E8E8E8
-const COL_DISABLED: COLORREF = COLORREF(0x008C8C8C); // #8C8C8C
+#[derive(Clone, Copy)]
+struct Palette {
+    bg: COLORREF,
+    hover: COLORREF,
+    border: COLORREF,
+    text: COLORREF,
+    disabled: COLORREF,
+}
+
+const DARK_PALETTE: Palette = Palette {
+    bg: COLORREF(0x00202020),
+    hover: COLORREF(0x00333333),
+    border: COLORREF(0x00454545),
+    text: COLORREF(0x00E8E8E8),
+    disabled: COLORREF(0x008C8C8C),
+};
+
+const LIGHT_PALETTE: Palette = Palette {
+    bg: COLORREF(0x00FFFFFF),
+    hover: COLORREF(0x00E8E8E8),
+    border: COLORREF(0x00B8B8B8),
+    text: COLORREF(0x00181818),
+    disabled: COLORREF(0x00707070),
+};
+
+fn palette(theme: Theme) -> Palette {
+    match theme {
+        Theme::Dark => DARK_PALETTE,
+        Theme::Light => LIGHT_PALETTE,
+    }
+}
 
 // ---------- геометрия ----------
 
@@ -110,100 +296,85 @@ struct MenuItem {
     text: String,
     kind: ItemKind,
     action: MenuAction,
+    submenu: Option<SubmenuKind>,
 }
 
 impl MenuItem {
     fn info(text: String) -> Self {
-        Self { text, kind: ItemKind::Info, action: MenuAction::None }
+        Self { text, kind: ItemKind::Info, action: MenuAction::None, submenu: None }
     }
     fn separator() -> Self {
-        Self { text: String::new(), kind: ItemKind::Separator, action: MenuAction::None }
+        Self { text: String::new(), kind: ItemKind::Separator, action: MenuAction::None, submenu: None }
     }
     fn radio(text: String, checked: bool, action: MenuAction) -> Self {
-        Self { text, kind: ItemKind::Radio(checked), action }
+        Self { text, kind: ItemKind::Radio(checked), action, submenu: None }
     }
     fn check(text: String, checked: bool, action: MenuAction) -> Self {
-        Self { text, kind: ItemKind::Check(checked), action }
+        Self { text, kind: ItemKind::Check(checked), action, submenu: None }
     }
     fn action_item(text: String, action: MenuAction) -> Self {
-        Self { text, kind: ItemKind::Action, action }
+        Self { text, kind: ItemKind::Action, action, submenu: None }
     }
-    fn submenu(text: String) -> Self {
-        Self { text, kind: ItemKind::Submenu, action: MenuAction::None }
+    fn submenu(text: String, submenu: SubmenuKind) -> Self {
+        Self { text, kind: ItemKind::Submenu, action: MenuAction::None, submenu: Some(submenu) }
     }
 }
 
 /// Собирает плоский список пунктов главного меню.
-fn build_items(devices: &[DeviceBattery], target: &str, target_name: &str, autostart: bool, updated: &str) -> Vec<MenuItem> {
+fn build_items(devices: &[DeviceBattery], target: &str, target_name: &str, autostart: bool, updated: &str, language: Language) -> Vec<MenuItem> {
     let mut items = Vec::new();
-
-    // 1. инфо: время обновления
-    items.push(MenuItem::info(format!("Обновлено: {}", updated)));
-
-    // 2. устройства (disabled); у target-устройства — маркер "●"
+    items.push(MenuItem::info(format!("{}: {}", text(language, "updated"), updated)));
     if devices.is_empty() {
-        items.push(MenuItem::info("Подключённых устройств нет".to_string()));
+        items.push(MenuItem::info(text(language, "no_devices").to_string()));
     } else {
         for d in devices {
-            let is_target = !d.address.is_empty() && d.address.eq_ignore_ascii_case(target);
-            let text = if is_target {
-                format!("● {}: {}%", d.name, d.level)
-            } else {
-                format!("{}: {}%", d.name, d.level)
-            };
-            items.push(MenuItem::info(text));
+            let name = device_name(language, &d.name);
+            let prefix = if !d.address.is_empty() && d.address.eq_ignore_ascii_case(target) { "● " } else { "" };
+            items.push(MenuItem::info(format!("{}{}: {}%", prefix, name, d.level)));
         }
     }
-
-    // 3. разделитель
     items.push(MenuItem::separator());
-
-    // 4. цель — отдельное подменю (чтобы меню не росло при 12+ устройствах)
     let target_label = if target.is_empty() {
-        "Цель: Авто (самое разряженное)".to_string()
+        format!("{}: {}", text(language, "target"), text(language, "auto"))
     } else {
         match devices.iter().find(|d| d.address.eq_ignore_ascii_case(target)) {
-            Some(d) => format!("Цель: {}", d.name),
-            None if !target_name.is_empty() => format!("Цель: {}", target_name),
-            None => "Цель: не подключено".to_string(),
+            Some(d) => format!("{}: {}", text(language, "target"), device_name(language, &d.name)),
+            None if !target_name.is_empty() => format!("{}: {}", text(language, "target"), target_name),
+            None => format!("{}: {}", text(language, "target"), text(language, "not_connected")),
         }
     };
-    items.push(MenuItem::submenu(target_label));
-
-    // 5. разделитель
+    items.push(MenuItem::submenu(target_label, SubmenuKind::Target));
+    items.push(MenuItem::submenu(text(language, "language").to_string(), SubmenuKind::Language));
+    items.push(MenuItem::submenu(text(language, "theme").to_string(), SubmenuKind::Theme));
     items.push(MenuItem::separator());
-
-    // 6. обновить
-    items.push(MenuItem::action_item("Обновить сейчас".to_string(), MenuAction::Refresh));
-
-    // 7. автозапуск
-    items.push(MenuItem::check("Автозапуск".to_string(), autostart, MenuAction::ToggleAutostart));
-
-    // 8. разделитель
+    items.push(MenuItem::action_item(text(language, "refresh").to_string(), MenuAction::Refresh));
+    items.push(MenuItem::check(text(language, "autostart").to_string(), autostart, MenuAction::ToggleAutostart));
     items.push(MenuItem::separator());
-
-    // 9. выход
-    items.push(MenuItem::action_item("Выход".to_string(), MenuAction::Exit));
-
+    items.push(MenuItem::action_item(text(language, "exit").to_string(), MenuAction::Exit));
     items
 }
 
-/// Пункты вложенного меню «Цель».
-fn build_target_items(devices: &[DeviceBattery], target: &str) -> Vec<MenuItem> {
-    let mut items = Vec::new();
-    items.push(MenuItem::radio(
-        "Авто (самое разряженное)".to_string(),
-        target.is_empty(),
-        MenuAction::SetTarget(String::new()),
-    ));
+fn build_target_items(devices: &[DeviceBattery], target: &str, language: Language) -> Vec<MenuItem> {
+    let mut items = vec![MenuItem::radio(text(language, "auto").to_string(), target.is_empty(), MenuAction::SetTarget(String::new()))];
     for d in devices {
-        items.push(MenuItem::radio(
-            d.name.clone(),
-            d.address.eq_ignore_ascii_case(target),
-            MenuAction::SetTarget(d.address.clone()),
-        ));
+        items.push(MenuItem::radio(device_name(language, &d.name).to_string(), d.address.eq_ignore_ascii_case(target), MenuAction::SetTarget(d.address.clone())));
     }
     items
+}
+
+fn build_language_items(language: Language) -> Vec<MenuItem> {
+    vec![
+        MenuItem::radio(text(language, "english").to_string(), language == Language::English, MenuAction::SetLanguage(Language::English)),
+        MenuItem::radio(text(language, "russian").to_string(), language == Language::Russian, MenuAction::SetLanguage(Language::Russian)),
+        MenuItem::radio(text(language, "ukrainian").to_string(), language == Language::Ukrainian, MenuAction::SetLanguage(Language::Ukrainian)),
+    ]
+}
+
+fn build_theme_items(language: Language, theme: Theme) -> Vec<MenuItem> {
+    vec![
+        MenuItem::radio(text(language, "dark").to_string(), theme == Theme::Dark, MenuAction::SetTheme(Theme::Dark)),
+        MenuItem::radio(text(language, "light").to_string(), theme == Theme::Light, MenuAction::SetTheme(Theme::Light)),
+    ]
 }
 
 // ---------- шрифт ----------
@@ -273,6 +444,14 @@ fn hit_test(items: &[MenuItem], y: i32, height: i32) -> i32 {
     -1
 }
 
+fn item_top(items: &[MenuItem], index: usize) -> i32 {
+    1 + items
+        .iter()
+        .take(index)
+        .map(|item| if item.kind == ItemKind::Separator { SEP_H } else { ITEM_H })
+        .sum::<i32>()
+}
+
 // ---------- отрисовка (общая для окна и render_test) ----------
 
 unsafe fn draw_radio(hdc: HDC, cx: i32, cy: i32, checked: bool, color: COLORREF) {
@@ -325,15 +504,16 @@ unsafe fn draw_arrow(hdc: HDC, cx: i32, cy: i32, color: COLORREF) {
 }
 
 /// Рисует всё меню в hdc. hover: индекс подсвеченного пункта (−1 = нет).
-unsafe fn paint_menu(hdc: HDC, items: &[MenuItem], hover: i32, font: HFONT, width: i32, height: i32) {
+unsafe fn paint_menu(hdc: HDC, items: &[MenuItem], hover: i32, font: HFONT, width: i32, height: i32, theme: Theme) {
+    let colors = palette(theme);
     // фон
-    let bg = CreateSolidBrush(COL_BG);
+    let bg = CreateSolidBrush(colors.bg);
     let full = RECT { left: 0, top: 0, right: width, bottom: height };
     let _ = FillRect(hdc, &full, bg);
     let _ = DeleteObject(bg);
 
     // рамка 1px
-    let border_pen = CreatePen(PS_SOLID, 1, COL_BORDER);
+    let border_pen = CreatePen(PS_SOLID, 1, colors.border);
     let old_pen = SelectObject(hdc, border_pen);
     let hollow = GetStockObject(NULL_BRUSH);
     let old_br = SelectObject(hdc, hollow);
@@ -348,8 +528,12 @@ unsafe fn paint_menu(hdc: HDC, items: &[MenuItem], hover: i32, font: HFONT, widt
     for (i, it) in items.iter().enumerate() {
         if it.kind == ItemKind::Separator {
             // линия-разделитель цветом рамки
+            let pen = CreatePen(PS_SOLID, 1, colors.border);
+            let old_separator_pen = SelectObject(hdc, pen);
             let _ = MoveToEx(hdc, 12, y + SEP_H / 2, None);
             let _ = LineTo(hdc, width - 12, y + SEP_H / 2);
+            let _ = SelectObject(hdc, old_separator_pen);
+            let _ = DeleteObject(pen);
             y += SEP_H;
             continue;
         }
@@ -358,19 +542,19 @@ unsafe fn paint_menu(hdc: HDC, items: &[MenuItem], hover: i32, font: HFONT, widt
 
         // hover-подсветка
         if i as i32 == hover {
-            let hb = CreateSolidBrush(COL_HOVER);
+            let hb = CreateSolidBrush(colors.hover);
             let _ = FillRect(hdc, &rect, hb);
             let _ = DeleteObject(hb);
         }
 
         // цвет текста: disabled-инфо — серым
-        let text_color = if it.kind == ItemKind::Info { COL_DISABLED } else { COL_TEXT };
+        let item_color = if it.kind == ItemKind::Info { colors.disabled } else { colors.text };
 
         let mut text_rect = rect;
         text_rect.left += TEXT_PAD;
         text_rect.right -= GLYPH_ZONE;
         let mut buf = to_utf16(&it.text);
-        let _ = SetTextColor(hdc, text_color);
+        let _ = SetTextColor(hdc, item_color);
         let _ = DrawTextW(
             hdc,
             &mut buf,
@@ -382,9 +566,9 @@ unsafe fn paint_menu(hdc: HDC, items: &[MenuItem], hover: i32, font: HFONT, widt
         let cx = width - GLYPH_ZONE / 2 - 1;
         let cy = y + ITEM_H / 2;
         match &it.kind {
-            ItemKind::Radio(checked) => draw_radio(hdc, cx, cy, *checked, COL_TEXT),
-            ItemKind::Check(checked) => draw_check(hdc, cx, cy, *checked, COL_TEXT),
-            ItemKind::Submenu => draw_arrow(hdc, cx, cy, COL_TEXT),
+            ItemKind::Radio(checked) => draw_radio(hdc, cx, cy, *checked, item_color),
+            ItemKind::Check(checked) => draw_check(hdc, cx, cy, *checked, item_color),
+            ItemKind::Submenu => draw_arrow(hdc, cx, cy, item_color),
             _ => {}
         }
 
@@ -408,7 +592,9 @@ struct MenuState {
     hover: i32,
     done: bool,
     result: MenuAction,
-    open_submenu: bool,
+    open_submenu: Option<SubmenuKind>,
+    submenu_top: i32,
+    theme: Theme,
 }
 
 /// Закрывает меню: помечает done, сохраняет результат, снимает хук,
@@ -458,7 +644,7 @@ unsafe extern "system" fn menu_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
             let hdc = BeginPaint(hwnd, &mut ps);
-            paint_menu(hdc, &state.items, state.hover, state.font, state.width, state.height);
+            paint_menu(hdc, &state.items, state.hover, state.font, state.width, state.height, state.theme);
             let _ = EndPaint(hwnd, &ps);
             LRESULT(0)
         }
@@ -489,8 +675,10 @@ unsafe extern "system" fn menu_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
             // открываем подменю, только если курсор всё ещё над меню
             let mut pt = POINT::default();
             let _ = GetCursorPos(&mut pt);
-            if WindowFromPoint(pt) == hwnd {
-                state.open_submenu = true;
+            if WindowFromPoint(pt) == hwnd && state.hover >= 0 {
+                let index = state.hover as usize;
+                state.open_submenu = state.items[index].submenu;
+                state.submenu_top = item_top(&state.items, index);
                 close_menu(hwnd, state, MenuAction::None);
             }
             LRESULT(0)
@@ -506,7 +694,8 @@ unsafe extern "system" fn menu_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
                     let item = &state.items[idx as usize];
                     if item.kind == ItemKind::Submenu {
                         // открыть вложенное меню (продолжит run_menu)
-                        state.open_submenu = true;
+                        state.open_submenu = item.submenu;
+                        state.submenu_top = item_top(&state.items, idx as usize);
                         close_menu(hwnd, state, MenuAction::None);
                         return LRESULT(0);
                     }
@@ -540,7 +729,8 @@ unsafe extern "system" fn menu_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
 
 struct PopupResult {
     action: MenuAction,
-    open_submenu: bool,
+    open_submenu: Option<SubmenuKind>,
+    submenu_top: i32,
     x: i32,
     y: i32,
     width: i32,
@@ -548,8 +738,8 @@ struct PopupResult {
 
 /// Показывает попап с пунктами у (x, y), ждёт выбора (вложенный цикл сообщений).
 /// Возвращает действие и итоговую геометрию окна (для позиционирования подменю).
-unsafe fn show_popup(items: Vec<MenuItem>, x: i32, y: i32) -> PopupResult {
-    let empty = PopupResult { action: MenuAction::None, open_submenu: false, x, y, width: 0 };
+unsafe fn show_popup(items: Vec<MenuItem>, x: i32, y: i32, theme: Theme) -> PopupResult {
+    let empty = PopupResult { action: MenuAction::None, open_submenu: None, submenu_top: 0, x, y, width: 0 };
 
     let hinstance: HINSTANCE = GetModuleHandleW(None).unwrap_or_default().into();
 
@@ -627,7 +817,9 @@ unsafe fn show_popup(items: Vec<MenuItem>, x: i32, y: i32) -> PopupResult {
         hover: -1,
         done: false,
         result: MenuAction::None,
-        open_submenu: false,
+        open_submenu: None,
+        submenu_top: 1,
+        theme,
     });
     let state_ptr: *mut MenuState = &mut *state;
     let _ = SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr as isize);
@@ -698,40 +890,34 @@ unsafe fn show_popup(items: Vec<MenuItem>, x: i32, y: i32) -> PopupResult {
 
     let result = std::mem::replace(&mut state_ref.result, MenuAction::None);
     let open_submenu = state_ref.open_submenu;
+    let submenu_top = state_ref.submenu_top;
     let font = state_ref.font;
     drop(state);
     // шрифт больше никому не нужен: HFONT не имеет Drop — без явного удаления
     // утекает GDI-объект при каждом открытии меню (лимит процесса ~10 000)
     let _ = DeleteObject(font);
-    PopupResult { action: result, open_submenu, x, y, width }
+    PopupResult { action: result, open_submenu, submenu_top, x, y, width }
 }
 
 // ---------- публичный API ----------
 
 /// Показывает тёмное меню у курсора, ждёт выбора (вложенный цикл сообщений).
 /// Возвращает действие; None — меню закрыто без выбора.
-pub fn run_menu(devices: &[DeviceBattery], target: &str, target_name: &str, autostart: bool) -> MenuAction {
+pub fn run_menu(devices: &[DeviceBattery], target: &str, target_name: &str, autostart: bool, language: Language, theme: Theme) -> MenuAction {
     let updated = chrono::Local::now().format("%H:%M:%S").to_string();
-    let items = build_items(devices, target, target_name, autostart, &updated);
-
-    // смещение пункта «Цель» от верха меню (для вертикального выравнивания подменю)
-    let target_top: i32 = items
-        .iter()
-        .take_while(|it| it.kind != ItemKind::Submenu)
-        .map(|it| if it.kind == ItemKind::Separator { SEP_H } else { ITEM_H })
-        .sum::<i32>()
-        + 1; // + верхняя рамка
+    let items = build_items(devices, target, target_name, autostart, &updated, language);
 
     unsafe {
         let mut pt = POINT::default();
         let _ = GetCursorPos(&mut pt);
-        let main = show_popup(items, pt.x - 4, pt.y - 4);
-        if !main.open_submenu {
-            return main.action;
-        }
+        let main = show_popup(items, pt.x - 4, pt.y - 4, theme);
+        let Some(submenu) = main.open_submenu else { return main.action; };
 
-        // подменю «Цель»: у правой кромки главного меню, выровнено по пункту
-        let sub_items = build_target_items(devices, target);
+        let sub_items = match submenu {
+            SubmenuKind::Target => build_target_items(devices, target, language),
+            SubmenuKind::Language => build_language_items(language),
+            SubmenuKind::Theme => build_theme_items(language, theme),
+        };
         let screen = GetDC(None);
         let font = create_menu_font();
         let (sub_w, sub_h) = measure(&sub_items, screen, font);
@@ -741,7 +927,7 @@ pub fn run_menu(devices: &[DeviceBattery], target: &str, target_name: &str, auto
         let sw = GetSystemMetrics(SM_CXSCREEN);
         let sh = GetSystemMetrics(SM_CYSCREEN);
         let mut sub_x = main.x + main.width;
-        let mut sub_y = main.y + target_top - 1;
+        let mut sub_y = main.y + main.submenu_top - 1;
         if sub_x + sub_w > sw {
             sub_x = main.x - sub_w; // не влезает справа — открыть слева
         }
@@ -755,7 +941,7 @@ pub fn run_menu(devices: &[DeviceBattery], target: &str, target_name: &str, auto
             sub_y = 0;
         }
 
-        let sub = show_popup(sub_items, sub_x, sub_y);
+        let sub = show_popup(sub_items, sub_x, sub_y, theme);
         sub.action
     }
 }
@@ -814,7 +1000,7 @@ pub fn render_test() {
         },
     ];
     // target строчными буквами — проверка case-insensitive совпадения адреса
-    let items = build_items(&devices, "aabbccddee01", "1MORE SonoFlow", true, "12:34:56");
+    let items = build_items(&devices, "aabbccddee01", "1MORE SonoFlow", true, "12:34:56", Language::English);
 
     unsafe {
         let screen = GetDC(None);
@@ -848,7 +1034,7 @@ pub fn render_test() {
         let old_bmp = SelectObject(mem, hbmp);
 
         // общий код отрисовки, без hover
-        paint_menu(mem, &items, -1, font, width, height);
+        paint_menu(mem, &items, -1, font, width, height, Theme::Dark);
 
         let n = match (width as usize)
             .checked_mul(height as usize)
