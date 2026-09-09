@@ -23,6 +23,8 @@ pub struct DeviceBattery {
 
 const CR_SUCCESS: u32 = 0;
 const CR_BUFFER_SMALL: u32 = 0x1A;
+const INITIAL_PROPERTY_SIZE: u32 = 4096;
+const MAX_PROPERTY_SIZE: u32 = 64 * 1024;
 
 const CM_LOCATE_DEVNODE_NORMAL: u32 = 0;
 
@@ -85,22 +87,25 @@ fn locate_devnode(instance_id: &str) -> Option<i32> {
 /// повтор с нужным размером; rc != 0 → свойства нет.
 fn get_devnode_property(devinst: i32, key: &DEVPROPKEY) -> Option<Vec<u8>> {
     let mut prop_type: u32 = 0;
-    let mut size: u32 = 4096;
+    let mut size: u32 = INITIAL_PROPERTY_SIZE;
     let mut buf = vec![0u8; size as usize];
     let rc = unsafe {
         CM_Get_DevNode_PropertyW(devinst, key, &mut prop_type, buf.as_mut_ptr(), &mut size, 0)
     };
     if rc == CR_SUCCESS {
-        buf.truncate(size as usize);
-        return Some(buf);
+        if size as usize <= buf.len() {
+            buf.truncate(size as usize);
+            return Some(buf);
+        }
+        return None;
     }
-    if rc == CR_BUFFER_SMALL && size > 0 {
+    if rc == CR_BUFFER_SMALL && size > 0 && size <= MAX_PROPERTY_SIZE {
         let mut buf = vec![0u8; size as usize];
         let mut size2 = size;
         let rc = unsafe {
             CM_Get_DevNode_PropertyW(devinst, key, &mut prop_type, buf.as_mut_ptr(), &mut size2, 0)
         };
-        if rc == CR_SUCCESS {
+        if rc == CR_SUCCESS && size2 as usize <= buf.len() {
             buf.truncate(size2 as usize);
             return Some(buf);
         }

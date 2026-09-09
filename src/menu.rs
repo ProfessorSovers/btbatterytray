@@ -242,7 +242,7 @@ unsafe fn measure(items: &[MenuItem], hdc: HDC, font: HFONT) -> (i32, i32) {
     let mut h = 2i32; // верхняя и нижняя рамка
     for it in items {
         if it.kind == ItemKind::Separator {
-            h += SEP_H;
+            h = h.saturating_add(SEP_H);
             continue;
         }
         let buf = to_utf16(&it.text);
@@ -251,10 +251,10 @@ unsafe fn measure(items: &[MenuItem], hdc: HDC, font: HFONT) -> (i32, i32) {
         if sz.cx > max_w {
             max_w = sz.cx;
         }
-        h += ITEM_H;
+        h = h.saturating_add(ITEM_H);
     }
     let _ = SelectObject(hdc, old);
-    (max_w + TEXT_PAD + GLYPH_ZONE + 4, h)
+    (max_w.saturating_add(TEXT_PAD + GLYPH_ZONE + 4), h)
 }
 
 /// Возвращает индекс пункта под y (client coords), или −1 (вне пунктов/рамки).

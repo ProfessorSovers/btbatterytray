@@ -47,7 +47,8 @@ struct AppState {
     last_levels: HashMap<String, u8>,
 }
 
-// приложение: GUI-поток + worker; AppState трогается только GUI-потоком
+// приложение: GUI-поток + worker; AppState трогается только GUI-потоком.
+// HICON is an opaque GUI handle and never crosses the worker boundary.
 unsafe impl Send for AppState {}
 
 static STATE: Mutex<Option<AppState>> = Mutex::new(None);
@@ -410,7 +411,13 @@ pub fn acquire_single_instance() -> bool {
 
 pub fn run() {
     unsafe {
-        let hinstance = GetModuleHandleW(None).expect("GetModuleHandleW");
+        let hinstance = match GetModuleHandleW(None) {
+            Ok(h) => h,
+            Err(e) => {
+                log_line(&format!("GetModuleHandleW failed: {}", e));
+                return;
+            }
+        };
         let class = windows::core::w!("BtTrayHidden");
 
         let wc = WNDCLASSW {
@@ -427,7 +434,7 @@ pub fn run() {
         };
         RegisterClassW(&wc);
 
-        let hwnd = CreateWindowExW(
+        let hwnd = match CreateWindowExW(
             WINDOW_EX_STYLE(0),
             class,
             windows::core::w!("BtBatteryTray"),
@@ -440,8 +447,17 @@ pub fn run() {
             HMENU::default(),
             windows::Win32::Foundation::HINSTANCE::from(hinstance),
             None,
-        )
-        .expect("CreateWindowExW");
+        ) {
+            Ok(h) => h,
+            Err(e) => {
+                log_line(&format!("CreateWindowExW failed: {}", e));
+                let handle = SINGLE_INSTANCE.swap(0, Ordering::AcqRel);
+                if handle != 0 {
+                    let _ = CloseHandle(HANDLE(handle as *mut core::ffi::c_void));
+                }
+                return;
+            }
+        };
 
         let icon = match TrayIcon::create(None) {
             Ok(i) => i,
