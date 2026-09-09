@@ -24,14 +24,14 @@ use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
     GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GWLP_USERDATA, HCURSOR, HHOOK, HICON, HMENU,
-    IDC_ARROW, KillTimer, LoadCursorW, MA_NOACTIVATE, MSG, PostMessageW,
+    IDC_ARROW, KillTimer, LoadCursorW, MSG, PostMessageW,
     RegisterClassW, SetCursor, SetTimer, SetWindowsHookExW, SetWindowLongPtrW, SetWindowPos,
     ShowWindow, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOWNA,
     TranslateMessage, UnhookWindowsHookEx, WH_MOUSE_LL,
     WindowFromPoint, WNDCLASSW, WM_ACTIVATE, WM_APP, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
     WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::battery::DeviceBattery;
@@ -655,10 +655,10 @@ unsafe extern "system" fn menu_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
     let state = &mut *(userdata as *mut MenuState);
 
     match msg {
-        WM_ACTIVATE => {
-            if wparam.0 == 0 { close_menu(hwnd, state, MenuAction::None); }
-            LRESULT(0)
-        }
+        // Parent activation is lost normally when a submenu becomes active.  The
+        // cursor/group checks below are authoritative; closing here races the
+        // child's activation and closes both popups during the hand-off.
+        WM_ACTIVATE => LRESULT(0),
         WM_TIMER if wparam.0 as usize == FOCUS_CHECK_TIMER => {
             let mut pt = POINT::default();
             let _ = GetCursorPos(&mut pt);
@@ -669,7 +669,7 @@ unsafe extern "system" fn menu_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
             }
             LRESULT(0)
         }
-        WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize), // 3 — не активировать
+        WM_MOUSEACTIVATE => DefWindowProcW(hwnd, msg, wparam, lparam),
         WM_ERASEBKGND => LRESULT(1), // фон рисуем в WM_PAINT целиком
         WM_SETCURSOR => {
             // всегда обычная стрелка — никаких busy/loading-курсоров
@@ -840,7 +840,7 @@ unsafe fn create_popup(items: Vec<MenuItem>, x: i32, y: i32, theme: Theme) -> Po
 
     // окно-попап
     let hwnd = match CreateWindowExW(
-        WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
+        WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
         w!("BtBatteryTray_PopupMenu"),
         w!(""),
         WS_POPUP,
@@ -893,6 +893,8 @@ unsafe fn create_popup(items: Vec<MenuItem>, x: i32, y: i32, theme: Theme) -> Po
 
 unsafe fn destroy_kept_popup(mut popup: PopupResult) {
     let Some(hwnd) = popup.window else { return; };
+    let _ = KillTimer(hwnd, FOCUS_CHECK_TIMER);
+    let _ = KillTimer(hwnd, SUBMENU_HOVER_TIMER);
     let _ = SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
     let _ = DestroyWindow(hwnd);
     if let Some(state) = popup.state.take() {
