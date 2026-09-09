@@ -7,7 +7,8 @@ It is intended for devices such as Bluetooth headphones, speakers, mice, keyboar
 ## What it does
 
 - polls Windows for Bluetooth devices with a reported battery level;
-- shows connected devices only;
+- shows connected devices in normal operation;
+- falls back to devices with an available battery level if Windows cannot provide connection status;
 - displays the selected device's level in the tray icon, or the lowest level automatically;
 - shows device names and levels in the tray tooltip;
 - warns about low battery;
@@ -54,6 +55,8 @@ The log is limited to approximately 200 KB and contains device names and battery
 Battery reporting depends on Windows, the Bluetooth adapter, the device, and its driver. A paired device may not appear if it is not connected. A connected device may also be absent when Windows does not expose its battery level.
 
 The application does not communicate with device vendors' cloud services and does not bypass Windows Bluetooth APIs.
+
+For development, `BtBatteryTray.exe --rendertest` renders a sample menu to `menu_test.bmp` in the current directory. This diagnostic mode is not used during normal startup.
 
 ## Build from source
 

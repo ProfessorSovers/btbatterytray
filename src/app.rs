@@ -5,11 +5,11 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS, HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Gdi::HBRUSH;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::CreateMutexW;
@@ -52,7 +52,9 @@ unsafe impl Send for AppState {}
 
 static STATE: Mutex<Option<AppState>> = Mutex::new(None);
 static REFRESH_NOW: AtomicBool = AtomicBool::new(false);
+static STOP_WORKER: AtomicBool = AtomicBool::new(false);
 static LAST_DEVICES: Mutex<Vec<DeviceBattery>> = Mutex::new(Vec::new());
+static SINGLE_INSTANCE: AtomicIsize = AtomicIsize::new(0);
 
 // ---------- утилиты ----------
 
@@ -76,10 +78,7 @@ fn log_line(msg: &str) {
 fn to_wide<const N: usize>(s: &str) -> [u16; N] {
     let mut buf = [0u16; N];
     let mut i = 0;
-    for u in s.encode_utf16() {
-        if i >= N {
-            break;
-        }
+    for u in s.encode_utf16().take(N.saturating_sub(1)) {
         buf[i] = u;
         i += 1;
     }
@@ -303,6 +302,9 @@ fn ui_refresh(hwnd: HWND) {
 fn worker_loop(hwnd: HWND) {
     let mut last = Instant::now().checked_sub(POLL_PERIOD).unwrap_or_else(Instant::now);
     loop {
+        if STOP_WORKER.load(Ordering::Acquire) {
+            break;
+        }
         if REFRESH_NOW.swap(false, Ordering::SeqCst) || last.elapsed() >= POLL_PERIOD {
             last = Instant::now();
             let connected = match get_connected_addresses() {
@@ -314,8 +316,10 @@ fn worker_loop(hwnd: HWND) {
             };
             let devices = get_devices_with_battery(connected.as_ref());
             *LAST_DEVICES.lock().unwrap() = devices;
-            unsafe {
-                let _ = PostMessageW(hwnd, WM_REFRESHED, WPARAM(0), LPARAM(0));
+            if !STOP_WORKER.load(Ordering::Acquire) {
+                unsafe {
+                    let _ = PostMessageW(hwnd, WM_REFRESHED, WPARAM(0), LPARAM(0));
+                }
             }
         }
         std::thread::sleep(Duration::from_millis(500));
@@ -391,8 +395,16 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
 
 pub fn acquire_single_instance() -> bool {
     unsafe {
-        let _ = CreateMutexW(None, false, windows::core::w!("Local\\BtBatteryTray_SingleInstance"));
-        GetLastError() != ERROR_ALREADY_EXISTS
+        let handle = match CreateMutexW(None, false, windows::core::w!("Local\\BtBatteryTray_SingleInstance")) {
+            Ok(h) => h,
+            Err(_) => return false,
+        };
+        if GetLastError() == ERROR_ALREADY_EXISTS {
+            let _ = CloseHandle(handle);
+            return false;
+        }
+        SINGLE_INSTANCE.store(handle.0 as isize, Ordering::Release);
+        true
     }
 }
 
@@ -459,8 +471,9 @@ pub fn run() {
 
         // worker опрашивает устройства; первый опрос — сразу
         // HWND не Send → передаём как usize (сырой адрес окна)
+        STOP_WORKER.store(false, Ordering::Release);
         let hwnd_addr = hwnd.0 as usize;
-        let _ = std::thread::spawn(move || worker_loop(HWND(hwnd_addr as *mut core::ffi::c_void)));
+        let worker = std::thread::spawn(move || worker_loop(HWND(hwnd_addr as *mut core::ffi::c_void)));
         REFRESH_NOW.store(true, Ordering::SeqCst);
 
         let mut msg = MSG {
@@ -476,6 +489,9 @@ pub fn run() {
             DispatchMessageW(&msg);
         }
 
+        STOP_WORKER.store(true, Ordering::Release);
+        let _ = worker.join();
+
         let del = NOTIFYICONDATAW {
             cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
             hWnd: hwnd,
@@ -484,5 +500,9 @@ pub fn run() {
         };
         let _ = Shell_NotifyIconW(NIM_DELETE, &del);
         *STATE.lock().unwrap() = None;
+        let handle = SINGLE_INSTANCE.swap(0, Ordering::AcqRel);
+        if handle != 0 {
+            let _ = CloseHandle(HANDLE(handle as *mut core::ffi::c_void));
+        }
     }
 }

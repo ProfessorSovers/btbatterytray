@@ -850,7 +850,28 @@ pub fn render_test() {
         // общий код отрисовки, без hover
         paint_menu(mem, &items, -1, font, width, height);
 
-        let n = (width * height * 4) as usize;
+        let n = match (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|pixels| pixels.checked_mul(4))
+        {
+            Some(n) => n,
+            None => {
+                let _ = SelectObject(mem, old_bmp);
+                let _ = DeleteObject(hbmp);
+                let _ = DeleteDC(mem);
+                let _ = ReleaseDC(None, screen);
+                let _ = DeleteObject(font);
+                return;
+            }
+        };
+        if bits.is_null() {
+            let _ = SelectObject(mem, old_bmp);
+            let _ = DeleteObject(hbmp);
+            let _ = DeleteDC(mem);
+            let _ = ReleaseDC(None, screen);
+            let _ = DeleteObject(font);
+            return;
+        }
         let pixels = std::slice::from_raw_parts(bits as *const u8, n);
 
         match write_bmp("menu_test.bmp", width, height, pixels) {
