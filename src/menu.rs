@@ -554,8 +554,8 @@ unsafe fn paint_menu(hdc: HDC, items: &[MenuItem], hover: i32, font: HFONT, widt
         let item_color = if it.kind == ItemKind::Info { colors.disabled } else { colors.text };
 
         let mut text_rect = rect;
-        text_rect.left += TEXT_PAD;
-        text_rect.right -= GLYPH_ZONE;
+        text_rect.left += GLYPH_ZONE;
+        text_rect.right -= TEXT_PAD;
         let mut buf = to_utf16(&it.text);
         let _ = SetTextColor(hdc, item_color);
         let _ = DrawTextW(
@@ -565,8 +565,8 @@ unsafe fn paint_menu(hdc: HDC, items: &[MenuItem], hover: i32, font: HFONT, widt
             DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
         );
 
-        // глифы справа, цветом текста
-        let cx = width - GLYPH_ZONE / 2 - 1;
+        // глифы слева: дочернее меню открывается в эту сторону
+        let cx = GLYPH_ZONE / 2 + 1;
         let cy = y + ITEM_H / 2;
         match &it.kind {
             ItemKind::Radio(checked) => draw_radio(hdc, cx, cy, *checked, item_color),
@@ -922,6 +922,7 @@ pub fn run_menu(devices: &[DeviceBattery], target: &str, target_name: &str, auto
                 if px!=parent.x {let _=SetWindowPos(parent_hwnd,HWND::default(),px,parent.y,0,0,SWP_NOACTIVATE|SWP_NOSIZE|SWP_NOZORDER);parent.x=px;}
                 let sy=(parent.y+parent_state.submenu_top-1).min((GetSystemMetrics(SM_CYSCREEN)-sh).max(0));
                 child=Some(create_popup(sub_items,parent.x-sw,sy,theme));
+                HOOK_CHILD_HWND.store(child.as_ref().and_then(|p| p.window).map(|h| h.0 as isize).unwrap_or(0), Ordering::SeqCst);
             }
             if let Some(c)=child.as_mut() {if let Some(st)=c.state.as_mut(){if st.done {result=st.result.clone();break;}}}
         }
