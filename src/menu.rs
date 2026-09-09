@@ -25,8 +25,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
     GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GWLP_USERDATA, HCURSOR, HHOOK, HICON, HMENU,
     IDC_ARROW, KillTimer, LoadCursorW, MA_NOACTIVATE, MSG, PostMessageW, PostQuitMessage,
-    RegisterClassW, SetCursor, SetTimer, SetWindowsHookExW, SetWindowLongPtrW, ShowWindow,
-    SM_CXSCREEN, SM_CYSCREEN, SW_SHOWNA, TranslateMessage, UnhookWindowsHookEx, WH_MOUSE_LL,
+    RegisterClassW, SetCursor, SetTimer, SetWindowsHookExW, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOWNA,
+    TranslateMessage, UnhookWindowsHookEx, WH_MOUSE_LL,
     WindowFromPoint, WNDCLASSW, WM_APP, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
     WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER,
@@ -616,6 +617,21 @@ unsafe fn close_menu(hwnd: HWND, state: &mut MenuState, action: MenuAction) {
     let _ = DestroyWindow(hwnd);
 }
 
+/// Завершает цикл меню, сохраняя окно и состояние видимыми для подменю.
+unsafe fn suspend_menu(hwnd: HWND, state: &mut MenuState) {
+    if state.done {
+        return;
+    }
+    state.done = true;
+    state.result = MenuAction::None;
+    let _ = KillTimer(hwnd, SUBMENU_HOVER_TIMER);
+    let hook = HOOK_HANDLE.swap(0, Ordering::SeqCst);
+    HOOK_HWND.store(0, Ordering::SeqCst);
+    if hook != 0 {
+        let _ = UnhookWindowsHookEx(HHOOK(hook as *mut core::ffi::c_void));
+    }
+}
+
 fn client_pos(lparam: LPARAM) -> (i32, i32) {
     let v = lparam.0 as u32;
     let x = (v & 0xFFFF) as u16 as i16 as i32;
@@ -679,7 +695,7 @@ unsafe extern "system" fn menu_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
                 let index = state.hover as usize;
                 state.open_submenu = state.items[index].submenu;
                 state.submenu_top = item_top(&state.items, index);
-                close_menu(hwnd, state, MenuAction::None);
+                suspend_menu(hwnd, state);
             }
             LRESULT(0)
         }
@@ -696,7 +712,7 @@ unsafe extern "system" fn menu_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
                         // открыть вложенное меню (продолжит run_menu)
                         state.open_submenu = item.submenu;
                         state.submenu_top = item_top(&state.items, idx as usize);
-                        close_menu(hwnd, state, MenuAction::None);
+                        suspend_menu(hwnd, state);
                         return LRESULT(0);
                     }
                     item.action.clone()
@@ -734,12 +750,23 @@ struct PopupResult {
     x: i32,
     y: i32,
     width: i32,
+    window: Option<HWND>,
+    state: Option<Box<MenuState>>,
 }
 
 /// Показывает попап с пунктами у (x, y), ждёт выбора (вложенный цикл сообщений).
 /// Возвращает действие и итоговую геометрию окна (для позиционирования подменю).
 unsafe fn show_popup(items: Vec<MenuItem>, x: i32, y: i32, theme: Theme) -> PopupResult {
-    let empty = PopupResult { action: MenuAction::None, open_submenu: None, submenu_top: 0, x, y, width: 0 };
+    let empty = PopupResult {
+        action: MenuAction::None,
+        open_submenu: None,
+        submenu_top: 0,
+        x,
+        y,
+        width: 0,
+        window: None,
+        state: None,
+    };
 
     let hinstance: HINSTANCE = GetModuleHandleW(None).unwrap_or_default().into();
 
@@ -892,11 +919,34 @@ unsafe fn show_popup(items: Vec<MenuItem>, x: i32, y: i32, theme: Theme) -> Popu
     let open_submenu = state_ref.open_submenu;
     let submenu_top = state_ref.submenu_top;
     let font = state_ref.font;
+    if open_submenu.is_some() {
+        return PopupResult {
+            action: result,
+            open_submenu,
+            submenu_top,
+            x,
+            y,
+            width,
+            window: Some(hwnd),
+            state: Some(state),
+        };
+    }
     drop(state);
     // шрифт больше никому не нужен: HFONT не имеет Drop — без явного удаления
     // утекает GDI-объект при каждом открытии меню (лимит процесса ~10 000)
     let _ = DeleteObject(font);
-    PopupResult { action: result, open_submenu, submenu_top, x, y, width }
+    PopupResult { action: result, open_submenu, submenu_top, x, y, width, window: None, state: None }
+}
+
+unsafe fn destroy_kept_popup(mut popup: PopupResult) {
+    let Some(hwnd) = popup.window else { return; };
+    let _ = SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+    let _ = DestroyWindow(hwnd);
+    if let Some(state) = popup.state.take() {
+        let font = state.font;
+        drop(state);
+        let _ = DeleteObject(font);
+    }
 }
 
 // ---------- публичный API ----------
@@ -910,7 +960,7 @@ pub fn run_menu(devices: &[DeviceBattery], target: &str, target_name: &str, auto
     unsafe {
         let mut pt = POINT::default();
         let _ = GetCursorPos(&mut pt);
-        let main = show_popup(items, pt.x - 4, pt.y - 4, theme);
+        let mut main = show_popup(items, pt.x - 4, pt.y - 4, theme);
         let Some(submenu) = main.open_submenu else { return main.action; };
 
         let sub_items = match submenu {
@@ -926,23 +976,37 @@ pub fn run_menu(devices: &[DeviceBattery], target: &str, target_name: &str, auto
 
         let sw = GetSystemMetrics(SM_CXSCREEN);
         let sh = GetSystemMetrics(SM_CYSCREEN);
-        let mut sub_x = main.x + main.width;
-        let mut sub_y = main.y + main.submenu_top - 1;
-        if sub_x + sub_w > sw {
-            sub_x = main.x - sub_w; // не влезает справа — открыть слева
+        let max_parent_x = (sw - main.width).max(0);
+        if main.x < sub_w {
+            let parent_x = sub_w.min(max_parent_x);
+            if parent_x != main.x {
+                if let Some(hwnd) = main.window {
+                    let _ = SetWindowPos(
+                        hwnd,
+                        HWND::default(),
+                        parent_x,
+                        main.y,
+                        0,
+                        0,
+                        SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOZORDER,
+                    );
+                }
+                main.x = parent_x;
+            }
         }
+        let sub_x = main.x - sub_w;
+        let mut sub_y = main.y + main.submenu_top - 1;
         if sub_y + sub_h > sh {
             sub_y = sh - sub_h;
-        }
-        if sub_x < 0 {
-            sub_x = 0;
         }
         if sub_y < 0 {
             sub_y = 0;
         }
 
         let sub = show_popup(sub_items, sub_x, sub_y, theme);
-        sub.action
+        let action = sub.action;
+        destroy_kept_popup(main);
+        action
     }
 }
 
