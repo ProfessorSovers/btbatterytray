@@ -1,82 +1,108 @@
 # BtBatteryTray
 
-Lightweight Windows tray application that displays battery levels reported by the Windows Bluetooth stack.
+**English** · [Русский](README.ru.md) · [Українська](README.uk.md)
 
-It is intended for devices such as Bluetooth headphones, speakers, mice, keyboards, game controllers, and other peripherals whose battery level is exposed to Windows.
+A small Windows tray application that shows the battery level of your Bluetooth devices — headphones, speakers, mouse, keyboard, game controller — right in the notification area.
 
 ## What it does
 
-- polls Windows for Bluetooth devices with a reported battery level;
-- shows connected devices in normal operation;
-- falls back to devices with an available battery level if Windows cannot provide connection status;
-- displays the selected device's level in the tray icon, or the lowest level automatically;
-- shows device names and levels in the tray tooltip;
-- warns about low battery;
-- provides dark and light tray themes;
-- supports English, Russian, and Ukrainian interface languages;
-- optionally starts with Windows;
-- runs without a regular window and does not appear in `Alt+Tab`;
-- is distributed as a standalone executable.
+- shows **only currently connected** devices;
+- draws the battery level of the selected **target** device into the tray icon, or the lowest level automatically;
+- lists device names and levels in the tray tooltip;
+- warns about a low battery;
+- **dark** and **light** menu themes;
+- **English**, **Russian** and **Ukrainian** interface;
+- optional start with Windows;
+- no installer, no runtime, no network access.
 
-The default polling interval is 60 seconds. A manual refresh is available from the tray menu.
+The list is refreshed every 60 seconds. **Refresh now** in the menu requests an immediate update.
 
-## Download
+## Screenshots
 
-Download the latest `BtBatteryTray.exe` from [Releases](https://github.com/ProfessorSovers/btbatterytrey/releases).
+| Dark theme | Light theme |
+|:---:|:---:|
+| ![Menu, dark theme](docs/menu-dark.png) | ![Menu, light theme](docs/menu-light.png) |
 
-The application is portable: no installer, .NET runtime, Rust installation, DLLs, or additional folders are required. Copy the executable to any convenient folder and run it.
+Submenus — **Target**, **Language**, **Theme** — open to the left of the main menu, which stays visible:
 
-Windows SmartScreen may show a warning because the executable is not digitally signed. This is common for small independently distributed Windows applications. Download the file only from this repository's Releases page.
+![Submenu](docs/submenu-dark.png)
+
+*The images above are rendered by the application itself (diagnostic mode `--rendertest`) and are pixel-identical to what appears on screen.*
+
+## Download and run
+
+1. Download `BtBatteryTray.exe` from [Releases](https://github.com/ProfessorSovers/btbatterytrey/releases).
+2. Put it in any folder you like and run it.
+3. The icon appears in the notification area. Click it to open the menu.
+
+Nothing else is required: no installer, no .NET or Rust runtime, no extra DLLs, no configuration. The executable is self-contained, and your settings are kept in the registry (see below), so you can move or rename the file freely.
+
+To update the application, replace the executable with a newer one and restart it. There is no auto-updater and no background service.
 
 ## Usage
 
-1. Run `BtBatteryTray.exe`.
-2. Open the tray menu by clicking the tray icon.
-3. Use **Target** to select the device whose level should be shown in the icon, or use automatic mode.
-4. Use **Refresh** to request an immediate update.
-5. Enable or disable Windows startup from the same menu.
-6. Select **Exit** to close the application.
+Open the menu by clicking the tray icon.
 
-The application stores its per-user settings in:
+- **Target** — which device the tray icon should follow: a specific device or *Auto (lowest battery)*.
+- **Language** — English / Русский / Українська.
+- **Theme** — dark or light.
+- **Refresh now** — request an immediate update.
+- **Start with Windows** — adds or removes the autostart entry.
+- **Exit** — quit the application.
+
+The tray tooltip lists every connected device with its level. Hover the icon to see it.
+
+The application stores its settings per user in:
 
 ```text
 HKCU\Software\BtBatteryTray
 ```
 
-The diagnostic log is stored in:
+The diagnostic log is written to:
 
 ```text
 %LOCALAPPDATA%\BtBatteryTray\log.txt
 ```
 
-The log is limited to approximately 200 KB and contains device names and battery levels observed by the application. No network service or telemetry is used.
+The log is capped at about 200 KB and contains only device names, battery levels and timings observed by the application. No network requests and no telemetry are used anywhere.
 
 ## Limitations
 
-Battery reporting depends on Windows, the Bluetooth adapter, the device, and its driver. A paired device may not appear if it is not connected. A connected device may also be absent when Windows does not expose its battery level.
+Battery reporting is provided by Windows, the Bluetooth adapter, the device and its driver. As a result:
 
-The application does not communicate with device vendors' cloud services and does not bypass Windows Bluetooth APIs.
+- a paired device is listed only while it is actually connected;
+- a connected device may be missing if Windows does not expose its battery level at all;
+- the level can be reported with a delay, since the device itself decides how often to send it.
 
-For development, `BtBatteryTray.exe --rendertest` renders a sample menu to `menu_test.bmp` in the current directory. This diagnostic mode is not used during normal startup.
+If Windows cannot report connection status at all, the application falls back to showing every device that has an available battery level, instead of showing nothing.
+
+The application does not talk to vendors' cloud services and does not bypass the Windows Bluetooth APIs.
+
+## Diagnostics
+
+Useful when reporting a problem:
+
+```text
+BtBatteryTray.exe --conntest    # detected devices, connection verdict and timing
+BtBatteryTray.exe --rendertest  # renders the menu to BMP files in the current directory
+```
+
+Both modes are standalone: they print or write a file and exit without starting the tray icon.
 
 ## Build from source
 
+The following is for developers. If you just want to use the application, download the executable from Releases — see above.
+
 Requirements:
 
-- Windows 10 or later;
+- Windows 10 or later (x64);
 - Rust and Cargo: <https://rustup.rs/>.
-
-Build the release executable:
 
 ```text
 cargo build --release
 ```
 
-The executable is created at:
-
-```text
-target\release\BtBatteryTray.exe
-```
+The executable is created at `target\release\BtBatteryTray.exe`.
 
 Run the test suite:
 
@@ -90,4 +116,4 @@ MIT. See [LICENSE](LICENSE).
 
 ## Status
 
-The application is developed and tested on Windows 10. Hardware support depends on whether Windows exposes a battery level for the particular Bluetooth device.
+Developed and tested on Windows 10. Whether a particular Bluetooth device reports its battery level is decided entirely by Windows and the device driver.
