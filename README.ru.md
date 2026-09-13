@@ -31,7 +31,7 @@
 
 ## Скачать и запустить
 
-1. Скачайте `BtBatteryTray.exe` со страницы [Releases](https://github.com/ProfessorSovers/btbatterytrey/releases).
+1. Скачайте `BtBatteryTray.exe` со страницы [Releases](https://github.com/ProfessorSovers/btbatterytray/releases).
 2. Положите файл в любую папку и запустите.
 3. В области уведомлений появится иконка. Клик по ней открывает меню.
 

@@ -31,7 +31,7 @@ Submenus — **Target**, **Language**, **Theme** — open to the left of the mai
 
 ## Download and run
 
-1. Download `BtBatteryTray.exe` from [Releases](https://github.com/ProfessorSovers/btbatterytrey/releases).
+1. Download `BtBatteryTray.exe` from [Releases](https://github.com/ProfessorSovers/btbatterytray/releases).
 2. Put it in any folder you like and run it.
 3. The icon appears in the notification area. Click it to open the menu.
 
