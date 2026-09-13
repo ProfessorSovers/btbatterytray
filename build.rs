@@ -74,12 +74,44 @@ fn runs(cmd: &str, flag: &str) -> bool {
 
 /// Компилирует ресурсы и просит линкер подхватить результат.
 fn build(compiler: &str, args: &[&str], artifact: &Path) -> bool {
-    let ok = Command::new(compiler)
-        .args(args)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-        && artifact.is_file();
+    let mut cmd = Command::new(compiler);
+    cmd.args(args);
+
+    // windres сам не компилирует .rc: препроцессор (gcc/cpp) он ищет в PATH.
+    // Если gcc лежит рядом с windres (так в winlibs), достаточно добавить эту
+    // папку в PATH дочернего процесса. Задавать --preprocessor вручную нельзя:
+    // вместе с ним теряются штатные аргументы windres, и gcc уходит в линковку.
+    if let Some(dir) = Path::new(compiler).parent() {
+        if dir.join("gcc.exe").is_file() {
+            let mut paths = vec![dir.to_path_buf()];
+            if let Some(existing) = env::var_os("PATH") {
+                paths.extend(env::split_paths(&existing));
+            }
+            if let Ok(joined) = env::join_paths(paths) {
+                cmd.env("PATH", joined);
+            }
+        }
+    }
+
+    let ok = match cmd.output() {
+        Ok(out) => {
+            if !out.status.success() {
+                // Показываем причину в логе сборки, а не молчим
+                let msg = String::from_utf8_lossy(&out.stderr);
+                let msg = msg.trim();
+                println!(
+                    "cargo:warning={} завершился с ошибкой: {}",
+                    compiler,
+                    if msg.is_empty() { "(без сообщения)" } else { msg }
+                );
+            }
+            out.status.success() && artifact.is_file()
+        }
+        Err(e) => {
+            println!("cargo:warning={} не удалось запустить: {}", compiler, e);
+            false
+        }
+    };
 
     if ok {
         println!("cargo:rustc-link-arg-bins={}", path(artifact));
