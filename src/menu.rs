@@ -25,7 +25,8 @@ use windows::Win32::Foundation::{
     RECT, SIZE, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection,
+    AC_SRC_ALPHA, AC_SRC_OVER, AlphaBlend, BeginPaint, BI_RGB, BITMAPINFO, BITMAPINFOHEADER,
+    BLENDFUNCTION, CreateCompatibleDC, CreateDIBSection,
     CreateFontW, CreatePen, CreateSolidBrush, DeleteDC, DeleteObject, DIB_RGB_COLORS, DrawTextW,
     DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, Ellipse, EndPaint, FillRect, GetDC, GetStockObject,
     GetTextExtentPoint32W, HBRUSH, HDC, HFONT, InvalidateRect, LineTo, MoveToEx, NULL_BRUSH,
@@ -577,23 +578,109 @@ unsafe fn draw_check(hdc: HDC, cx: i32, cy: i32, checked: bool, color: COLORREF)
     let _ = DeleteObject(pen);
 }
 
-/// Заполненный треугольник, направленный влево — в сторону дочернего меню.
-/// Обводка явно отключается (NULL_PEN): `Polygon` рисует контур ТЕКУЩИМ пером,
-/// а в этот момент выбран перо рамки (другой цвет) — оно обводило заливку и
-/// «съедало» фигуру (вид поеденной моли). Геометрия симметрична центру.
+/// Стрелка подменю: сглаженный треугольник, направленный влево.
+/// GDI не умеет антиалиасинг у `Polygon`, поэтому фигура рисуется в 4× увеличенном
+/// 32-битном DIB, блок 4×4 усредняется в покрытие 0..255, и результат накладывается
+/// `AlphaBlend` с premultiplied-альфой. Обводка не рисуется (NULL_PEN): контур
+/// текущим пером рамки ранее «съедал» заливку на таком мелком размере.
 unsafe fn draw_arrow(hdc: HDC, cx: i32, cy: i32, color: COLORREF) {
-    let brush = CreateSolidBrush(color);
-    let old_brush = SelectObject(hdc, brush);
-    let old_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
-    let points = [
-        POINT { x: cx + 3, y: cy - 4 },
-        POINT { x: cx - 3, y: cy },
-        POINT { x: cx + 3, y: cy + 4 },
+    const SS: i32 = 4; // коэффициент суперсэмплинга
+    const AW: i32 = 6; // ширина: острие → основание
+    const AH: i32 = 8; // высота
+
+    let mem = CreateCompatibleDC(hdc);
+    if mem.is_invalid() {
+        return;
+    }
+
+    let bw = AW * SS;
+    let bh = AH * SS;
+    let mut bmi = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: bw,
+            biHeight: -bh, // top-down
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        bmiColors: [RGBQUAD::default(); 1],
+    };
+    let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+    let bmp = match CreateDIBSection(mem, &mut bmi, DIB_RGB_COLORS, &mut bits, None, 0) {
+        Ok(b) if !bits.is_null() => b,
+        Ok(b) => {
+            let _ = DeleteObject(b);
+            let _ = DeleteDC(mem);
+            return;
+        }
+        Err(_) => {
+            let _ = DeleteDC(mem);
+            return;
+        }
+    };
+    let old_bmp = SelectObject(mem, bmp);
+    let src = bits as *mut u8;
+    std::ptr::write_bytes(src, 0, (bw * bh * 4) as usize);
+
+    // маска: белый треугольник на чёрном фоне
+    let white = CreateSolidBrush(COLORREF(0x00FF_FFFF));
+    let old_brush = SelectObject(mem, white);
+    let old_pen = SelectObject(mem, GetStockObject(NULL_PEN));
+    let pts = [
+        POINT { x: bw, y: 0 },
+        POINT { x: 0, y: bh / 2 },
+        POINT { x: bw, y: bh },
     ];
-    let _ = Polygon(hdc, &points);
-    let _ = SelectObject(hdc, old_pen);
-    let _ = SelectObject(hdc, old_brush);
-    let _ = DeleteObject(brush);
+    let _ = Polygon(mem, &pts);
+    let _ = SelectObject(mem, old_pen);
+    let _ = SelectObject(mem, old_brush);
+    let _ = DeleteObject(white);
+
+    // усреднение 4×4 → premultiplied BGRA (AC_SRC_ALPHA требует premultiplied)
+    let c = color.0;
+    let (r, g, b) = ((c & 0xFF) as u32, ((c >> 8) & 0xFF) as u32, ((c >> 16) & 0xFF) as u32);
+    let mut out = vec![0u8; (AW * AH * 4) as usize];
+    for j in 0..AH {
+        for i in 0..AW {
+            let mut sum = 0u32;
+            for dy in 0..SS {
+                for dx in 0..SS {
+                    let off = (((j * SS + dy) * bw + (i * SS + dx)) * 4) as usize;
+                    sum += *src.add(off) as u32;
+                }
+            }
+            let cov = sum / (SS * SS) as u32; // 0..255
+            let idx = ((j * AW + i) * 4) as usize;
+            out[idx] = (b * cov / 255) as u8;
+            out[idx + 1] = (g * cov / 255) as u8;
+            out[idx + 2] = (r * cov / 255) as u8;
+            out[idx + 3] = cov as u8;
+        }
+    }
+    // уменьшенная картинка кладётся в начало того же DIB (он top-down, шаг bw*4)
+    for j in 0..AH {
+        for i in 0..AW {
+            let s = ((j * AW + i) * 4) as usize;
+            let d = ((j * bw + i) * 4) as usize;
+            for k in 0..4 {
+                *src.add(d + k) = out[s + k];
+            }
+        }
+    }
+
+    let blend = BLENDFUNCTION {
+        BlendOp: AC_SRC_OVER as u8,
+        BlendFlags: 0,
+        SourceConstantAlpha: 255,
+        AlphaFormat: AC_SRC_ALPHA as u8,
+    };
+    let _ = AlphaBlend(hdc, cx - AW / 2, cy - AH / 2, AW, AH, mem, 0, 0, AW, AH, blend);
+
+    let _ = SelectObject(mem, old_bmp);
+    let _ = DeleteObject(bmp);
+    let _ = DeleteDC(mem);
 }
 
 /// Рисует всё меню в hdc. hover: индекс подсвеченного пункта (−1 = нет).
