@@ -27,9 +27,9 @@ use windows::Win32::UI::Accessibility::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
-        GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GWLP_USERDATA, HCURSOR, HHOOK, HICON, HMENU,
+        GetSystemMetrics, GetWindowLongPtrW, GWLP_USERDATA, HCURSOR, HHOOK, HICON, HMENU,
     EVENT_SYSTEM_FOREGROUND, WINEVENT_OUTOFCONTEXT,
-    IDC_ARROW, KillTimer, LoadCursorW, MSG, PostMessageW,
+    IDC_ARROW, KillTimer, LoadCursorW, MSG, PeekMessageW, PM_REMOVE, PostMessageW,
     MA_NOACTIVATE,
     RegisterClassW, SetCursor, SetTimer, SetWindowsHookExW, SetWindowLongPtrW, SetWindowPos,
     ShowWindow, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOWNA,
@@ -262,6 +262,12 @@ static FG_HOOK_HANDLE: AtomicIsize = AtomicIsize::new(0);
 static FG_HOOK_HWND: AtomicIsize = AtomicIsize::new(0);
 static FG_HOOK_CREATED_AT: AtomicIsize = AtomicIsize::new(0);
 const FG_GRACE_MS: i64 = 350; // не закрывать сразу при открытии меню (foreground-событие от показа окна)
+/// Единый признак закрытия popup-группы. Ставится любым окном группы
+/// (parent или child) при клике вне группы, Esc или foreground-loss.
+/// Цикл `run_menu` проверяет его и закрывает ВСЮ группу целиком — иначе
+/// закрытие дочернего окна терялось, и меню висело, перехватывая мышь.
+static GROUP_CLOSED: AtomicBool = AtomicBool::new(false);
+static GROUP_PARENT: AtomicIsize = AtomicIsize::new(0);
 
 /// Окно меню взяло/отдало фокус (`EVENT_SYSTEM_FOREGROUND`). Окна меню —
 /// `WS_EX_NOACTIVATE`, поэтому foreground уходит в другое приложение при
@@ -297,20 +303,18 @@ unsafe extern "system" fn fg_event_hook(
     let child = HOOK_CHILD_HWND.load(Ordering::SeqCst);
     let fg = hwnd.0 as isize;
     if fg != parent && fg != child {
-        // фокус ушёл в другое приложение — закрыть popup-группу
-        let _ = PostMessageW(
-            HWND(parent as *mut core::ffi::c_void),
-            WM_HOOK_CLOSE,
-            WPARAM(0),
-            LPARAM(0),
-        );
+        // фокус ушёл в другое приложение — закрыть всю popup-группу
+        GROUP_CLOSED.store(true, Ordering::SeqCst);
     }
 }
 
 unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code >= 0 {
         let msg = wparam.0 as u32;
-        if matches!(msg, WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN) {
+        // Закрываем только по КЛИКУ вне группы. Увод курсора меню не закрывает:
+        // подменю открывается наведением, и переход курсора на дочернее окно
+        // не должен схлопывать группу.
+        if matches!(msg, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN) {
             let hwnd = HOOK_HWND.load(Ordering::SeqCst);
             if hwnd != 0 {
                 let mut pt = POINT::default();
@@ -318,13 +322,22 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 let under = WindowFromPoint(pt);
                 let child = HOOK_CHILD_HWND.load(Ordering::SeqCst);
                 if under.0 as isize != hwnd && under.0 as isize != child {
-                    // клик вне обоих окон меню — попросить меню закрыться
+                    // Клик вне обоих окон группы — закрыть группу целиком.
+                    // Шлём обоим окнам: любое из них поднимет GROUP_CLOSED.
                     let _ = PostMessageW(
                         HWND(hwnd as *mut core::ffi::c_void),
                         WM_HOOK_CLOSE,
                         WPARAM(0),
                         LPARAM(0),
                     );
+                    if child != 0 {
+                        let _ = PostMessageW(
+                            HWND(child as *mut core::ffi::c_void),
+                            WM_HOOK_CLOSE,
+                            WPARAM(0),
+                            LPARAM(0),
+                        );
+                    }
                 }
             }
         }
@@ -792,16 +805,17 @@ unsafe extern "system" fn menu_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
             LRESULT(0)
         }
         WM_HOOK_CLOSE => {
-            // клик вне окна меню (сообщил хук мыши) — закрыть без выбора
-            close_menu(hwnd, state, MenuAction::None);
+            // клик вне окна меню (сообщил хук мыши) — закрыть ВСЮ группу:
+            // флаг читает цикл run_menu, который уничтожает parent и child.
+            GROUP_CLOSED.store(true, Ordering::SeqCst);
             LRESULT(0)
         }
         WM_KEYDOWN if wparam.0 as u32 == VK_ESCAPE.0 as u32 => {
-            close_menu(hwnd, state, MenuAction::None);
+            GROUP_CLOSED.store(true, Ordering::SeqCst);
             LRESULT(0)
         }
         WM_CLOSE => {
-            close_menu(hwnd, state, MenuAction::None);
+            GROUP_CLOSED.store(true, Ordering::SeqCst);
             LRESULT(0)
         }
         WM_DESTROY => LRESULT(0),
@@ -989,18 +1003,36 @@ pub fn run_menu(devices: &[DeviceBattery], target: &str, target_name: &str, auto
                 );
                 if !fg_hook.is_invalid() { FG_HOOK_HANDLE.store(fg_hook.0 as isize, Ordering::SeqCst); }
                 let mut child: Option<PopupResult> = None; let mut result = MenuAction::None; let mut msg=MSG::default();
-        loop {
-            let ok=GetMessageW(&mut msg,None,0,0); if !ok.as_bool(){break;}
-            let ph=parent.window; let ch=child.as_ref().and_then(|p|p.window);
-            if msg.message==WM_KEYDOWN && msg.wParam.0 as u32==VK_ESCAPE.0 as u32 {break;}
-            // Dispatch menu-owned mouse messages first. In particular, do not let the
-            // outer loop consume WM_LBUTTONDOWN before menu_wnd_proc can suspend the
-            // parent and publish open_submenu for the child-popup step below.
-            if Some(msg.hwnd)==ph || Some(msg.hwnd)==ch {
-                let _=TranslateMessage(&msg); DispatchMessageW(&msg);
-            } else if msg.message==WM_MOUSEMOVE {
-            } else if matches!(msg.message, WM_LBUTTONDOWN|WM_LBUTTONUP|WM_RBUTTONDOWN|WM_RBUTTONUP|WM_MBUTTONDOWN|WM_MBUTTONUP|WM_MOUSEWHEEL|WM_TRAY) {break;}
-            else { let _=TranslateMessage(&msg); DispatchMessageW(&msg); }
+                GROUP_CLOSED.store(false, Ordering::SeqCst);
+                GROUP_PARENT.store(parent_hwnd.0 as isize, Ordering::SeqCst);
+                loop {
+                    // PeekMessage с коротким таймаутом вместо блокирующего GetMessage:
+                    // флаг GROUP_CLOSED может выставить hook из ДРУГОГО потока
+                    // (foreground-событие), и цикл должен проснуться и закрыться сам.
+                    let mut has_msg = false;
+                    let mut waited = 0u32;
+                    while waited < 50 {
+                        if PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() { has_msg = true; break; }
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                        waited += 5;
+                    }
+                    if !has_msg {
+                        // нет сообщений: проверяем флаг закрытия группы
+                        if GROUP_CLOSED.load(Ordering::SeqCst) { break; }
+                        continue;
+                    }
+                    let ph=parent.window; let ch=child.as_ref().and_then(|p|p.window);
+                    // Закрыть группу целиком, если любое из условий сработало
+                    if GROUP_CLOSED.load(Ordering::SeqCst) { break; }
+                    if msg.message==WM_KEYDOWN && msg.wParam.0 as u32==VK_ESCAPE.0 as u32 {break;}
+                    // Dispatch menu-owned mouse messages first. In particular, do not let the
+                    // outer loop consume WM_LBUTTONDOWN before menu_wnd_proc can suspend the
+                    // parent and publish open_submenu for the child-popup step below.
+                    if Some(msg.hwnd)==ph || Some(msg.hwnd)==ch {
+                        let _=TranslateMessage(&msg); DispatchMessageW(&msg);
+                    } else if msg.message==WM_MOUSEMOVE {
+                    } else if matches!(msg.message, WM_LBUTTONDOWN|WM_LBUTTONUP|WM_RBUTTONDOWN|WM_RBUTTONUP|WM_MBUTTONDOWN|WM_MBUTTONUP|WM_MOUSEWHEEL|WM_TRAY) {break;}
+                    else { let _=TranslateMessage(&msg); DispatchMessageW(&msg); }
             if parent_state.open_submenu.is_some() {
                 // The parent can request a different submenu while the old child is
                 // still alive. Replace it immediately so only one child popup exists.
@@ -1025,8 +1057,11 @@ pub fn run_menu(devices: &[DeviceBattery], target: &str, target_name: &str, auto
                                     }
                                 }
             }
-            if parent_state.done && child.is_none() {result=parent_state.result.clone();break;}
+            // Порядок важен: сначала забираем УЖЕ СДЕЛАННЫЙ выбор (иначе результат
+            // теряется), и только потом реагируем на закрытие группы вне выбора.
             if let Some(c)=child.as_mut() {if let Some(st)=c.state.as_mut(){if st.done {result=st.result.clone();break;}}}
+            if parent_state.done && child.is_none() {result=parent_state.result.clone();break;}
+            if GROUP_CLOSED.load(Ordering::SeqCst) {break;}
         }
         if let Some(c)=child {destroy_kept_popup(c);} destroy_kept_popup(parent);
         let hook=HOOK_HANDLE.swap(0,Ordering::SeqCst); HOOK_HWND.store(0,Ordering::SeqCst); HOOK_CHILD_HWND.store(0,Ordering::SeqCst); if hook!=0 {let _=UnhookWindowsHookEx(HHOOK(hook as *mut core::ffi::c_void));}
