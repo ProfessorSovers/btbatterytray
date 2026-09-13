@@ -21,10 +21,16 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
+use windows::Win32::UI::Accessibility::{
+    HWINEVENTHOOK, SetWinEventHook,
+    UnhookWinEvent,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
-    GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GWLP_USERDATA, HCURSOR, HHOOK, HICON, HMENU,
-    IDC_ARROW, KillTimer, LoadCursorW, MA_NOACTIVATE, MSG, PostMessageW,
+        GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GWLP_USERDATA, HCURSOR, HHOOK, HICON, HMENU,
+    EVENT_SYSTEM_FOREGROUND, WINEVENT_OUTOFCONTEXT,
+    IDC_ARROW, KillTimer, LoadCursorW, MSG, PostMessageW,
+    MA_NOACTIVATE,
     RegisterClassW, SetCursor, SetTimer, SetWindowsHookExW, SetWindowLongPtrW, SetWindowPos,
     ShowWindow, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOWNA,
     TranslateMessage, UnhookWindowsHookEx, WH_MOUSE_LL,
@@ -252,6 +258,54 @@ static HOOK_HANDLE: AtomicIsize = AtomicIsize::new(0);
 static HOOK_HWND: AtomicIsize = AtomicIsize::new(0);
 static HOOK_CHILD_HWND: AtomicIsize = AtomicIsize::new(0);
 static MENU_ACTIVE: AtomicBool = AtomicBool::new(false);
+static FG_HOOK_HANDLE: AtomicIsize = AtomicIsize::new(0);
+static FG_HOOK_HWND: AtomicIsize = AtomicIsize::new(0);
+static FG_HOOK_CREATED_AT: AtomicIsize = AtomicIsize::new(0);
+const FG_GRACE_MS: i64 = 350; // не закрывать сразу при открытии меню (foreground-событие от показа окна)
+
+/// Окно меню взяло/отдало фокус (`EVENT_SYSTEM_FOREGROUND`). Окна меню —
+/// `WS_EX_NOACTIVATE`, поэтому foreground уходит в другое приложение при
+/// Alt+Tab / клике вне меню; раз экземпляр меню закрыт или активное окно —
+/// не наше, закрываем всю группу.
+unsafe extern "system" fn fg_event_hook(
+    _h_event: HWINEVENTHOOK,
+    event: u32,
+    hwnd: HWND,
+    _id_object: i32,
+    _id_child: i32,
+    _event_thread: u32,
+    _event_time: u32,
+) {
+    // У нас только один интересующий диапазон (FOREGROUND) — фильтр по значению
+        // не обязателен, но оставляем для ясности.
+        if event != EVENT_SYSTEM_FOREGROUND || !MENU_ACTIVE.load(Ordering::SeqCst) {
+            return;
+        }
+        // Игнорируем foreground-события сразу после открытия: само появление окна
+        // меню может сгенерировать событие, и закрыть меню в этот момент нельзя.
+        let created = FG_HOOK_CREATED_AT.load(Ordering::SeqCst) as i64;
+        if created > 0 {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            if now_ms - created < FG_GRACE_MS {
+                return;
+            }
+        }
+    let parent = HOOK_HWND.load(Ordering::SeqCst);
+    let child = HOOK_CHILD_HWND.load(Ordering::SeqCst);
+    let fg = hwnd.0 as isize;
+    if fg != parent && fg != child {
+        // фокус ушёл в другое приложение — закрыть popup-группу
+        let _ = PostMessageW(
+            HWND(parent as *mut core::ffi::c_void),
+            WM_HOOK_CLOSE,
+            WPARAM(0),
+            LPARAM(0),
+        );
+    }
+}
 
 unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code >= 0 {
@@ -911,8 +965,30 @@ pub fn run_menu(devices: &[DeviceBattery], target: &str, target_name: &str, auto
         };
         let parent_state = parent.state.as_mut().unwrap();
         let hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), None, 0);
-        if let Ok(h) = hook { HOOK_HANDLE.store(h.0 as isize, Ordering::SeqCst); HOOK_HWND.store(parent_hwnd.0 as isize, Ordering::SeqCst); }
-        let mut child: Option<PopupResult> = None; let mut result = MenuAction::None; let mut msg=MSG::default();
+                if let Ok(h) = hook { HOOK_HANDLE.store(h.0 as isize, Ordering::SeqCst); HOOK_HWND.store(parent_hwnd.0 as isize, Ordering::SeqCst); }
+                // Глобальный foreground-hook: если активное окно ушло в другое приложение
+                // (Alt+Tab, клик вне меню, запуск другого приложения) — закрыть popup-группу.
+                // Окна меню WS_EX_NOACTIVATE никогда не становятся foreground, поэтому событие
+                // срабатывает только на реальный уход фокуса из приложения.
+                FG_HOOK_HWND.store(parent_hwnd.0 as isize, Ordering::SeqCst);
+                        FG_HOOK_CREATED_AT.store(
+                                                    std::time::SystemTime::now()
+                                                        .duration_since(std::time::UNIX_EPOCH)
+                                                        .map(|d| d.as_millis() as isize)
+                                                        .unwrap_or(0),
+                                                    Ordering::SeqCst,
+                                                );
+                        let fg_hook = SetWinEventHook(
+                    EVENT_SYSTEM_FOREGROUND,
+                    EVENT_SYSTEM_FOREGROUND,
+                    None,
+                    Some(fg_event_hook),
+                    0,
+                    0,
+                    WINEVENT_OUTOFCONTEXT,
+                );
+                if !fg_hook.is_invalid() { FG_HOOK_HANDLE.store(fg_hook.0 as isize, Ordering::SeqCst); }
+                let mut child: Option<PopupResult> = None; let mut result = MenuAction::None; let mut msg=MSG::default();
         loop {
             let ok=GetMessageW(&mut msg,None,0,0); if !ok.as_bool(){break;}
             let ph=parent.window; let ch=child.as_ref().and_then(|p|p.window);
@@ -954,7 +1030,8 @@ pub fn run_menu(devices: &[DeviceBattery], target: &str, target_name: &str, auto
         }
         if let Some(c)=child {destroy_kept_popup(c);} destroy_kept_popup(parent);
         let hook=HOOK_HANDLE.swap(0,Ordering::SeqCst); HOOK_HWND.store(0,Ordering::SeqCst); HOOK_CHILD_HWND.store(0,Ordering::SeqCst); if hook!=0 {let _=UnhookWindowsHookEx(HHOOK(hook as *mut core::ffi::c_void));}
-        MENU_ACTIVE.store(false, Ordering::SeqCst);
+                let fg_hook=FG_HOOK_HANDLE.swap(0,Ordering::SeqCst); FG_HOOK_HWND.store(0,Ordering::SeqCst); if fg_hook!=0 {let _=UnhookWinEvent(HWINEVENTHOOK(fg_hook as *mut core::ffi::c_void));}
+                MENU_ACTIVE.store(false, Ordering::SeqCst);
         result
     }
 }

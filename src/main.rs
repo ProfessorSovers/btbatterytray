@@ -4,7 +4,6 @@
 
 mod app;
 mod battery;
-mod conn;
 mod icon;
 mod menu;
 

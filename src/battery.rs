@@ -69,6 +69,17 @@ extern "system" {
         propertybuffersize: *mut u32,
         ulflags: u32,
     ) -> u32;
+    fn CM_Get_DevNode_Status(pulstatus: *mut u32, pulproblemnumber: *mut u32, dndevinst: i32, ulflags: u32) -> u32;
+}
+
+const DN_STARTED: u32 = 0x8; // драйвер запущен — устройство присутствует и подключено
+
+/// True, если devnode «стартовал» (устройство подключено и активно).
+fn devnode_connected(devinst: i32) -> bool {
+    let mut status: u32 = 0;
+    let mut problem: u32 = 0;
+    let rc = unsafe { CM_Get_DevNode_Status(&mut status, &mut problem, devinst, 0) };
+    rc == CR_SUCCESS && status & DN_STARTED != 0
 }
 
 /// devinst по instance ID; None, если узел не найден (rc != 0).
@@ -239,6 +250,10 @@ pub fn get_devices_with_battery(connected_only: Option<&HashSet<String>>) -> Vec
         let Some(devinst) = locate_devnode(&instance_id) else {
             continue;
         };
+
+        if !devnode_connected(devinst) {
+            continue; // устройство не подключено — пропускаем
+        }
 
         let level = read_battery_level(devinst);
         let name = read_friendly_name(devinst);

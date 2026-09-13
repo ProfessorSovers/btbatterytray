@@ -26,7 +26,6 @@ use winreg::enums::*;
 use winreg::RegKey;
 
 use crate::battery::{get_devices_with_battery, DeviceBattery};
-use crate::conn::get_connected_addresses;
 use crate::icon::TrayIcon;
 use crate::menu::{localized_device_name, low_battery_message, low_battery_title, run_menu, tooltip_empty, tray_tooltip, Language, MenuAction, Theme};
 
@@ -349,14 +348,10 @@ fn worker_loop(hwnd: HWND) {
         }
         if REFRESH_NOW.swap(false, Ordering::SeqCst) || last.elapsed() >= POLL_PERIOD {
             last = Instant::now();
-            let connected = match get_connected_addresses() {
-                Ok(s) => Some(s),
-                Err(e) => {
-                    log_line(&format!("conn warning (fail-open): {}", e));
-                    None
-                }
-            };
-            let devices = get_devices_with_battery(connected.as_ref());
+            // Подключённость определяем прямо в CfgMgr32 (CM_Get_DevNode_Status),
+            // а не через блокирующие WinRT FindAllAsync().get() — иначе каждый опрос
+            // «зависает» на секунды и «Обновить сейчас» выглядит мёртвым.
+            let devices = get_devices_with_battery(None);
             *LAST_DEVICES.lock().unwrap() = devices;
             if !STOP_WORKER.load(Ordering::Acquire) {
                 unsafe {
