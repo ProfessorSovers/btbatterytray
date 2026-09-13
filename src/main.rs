@@ -24,8 +24,19 @@ fn main() {
         return;
     }
 
-    if !app::acquire_single_instance() {
+    // служебный режим: показать уведомление о низком заряде и выйти
+    // (--balloontest или --balloontest=15; реальный триггер — строго ниже 20%)
+    let demo_level = args.iter().find_map(|a| {
+        a.strip_prefix("--balloontest").map(|rest| {
+            rest.strip_prefix('=')
+                .and_then(|v| v.parse::<u8>().ok())
+                .unwrap_or(15)
+        })
+    });
+
+    // демо не берёт мьютекс: его можно запускать, не закрывая работающий экземпляр
+    if demo_level.is_none() && !app::acquire_single_instance() {
         return; // уже запущено
     }
-    app::run();
+    app::run(demo_level);
 }

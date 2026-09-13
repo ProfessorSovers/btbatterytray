@@ -83,11 +83,16 @@ The application does not talk to vendors' cloud services and does not bypass the
 Useful when reporting a problem:
 
 ```text
-BtBatteryTray.exe --conntest    # detected devices, connection verdict and timing
-BtBatteryTray.exe --rendertest  # renders the menu to BMP files in the current directory
+BtBatteryTray.exe --conntest      # detected devices, connection verdict and timing
+BtBatteryTray.exe --rendertest    # renders the menu to BMP files in the current directory
+BtBatteryTray.exe --balloontest   # shows the low-battery notification immediately
+                                  # (the percentage is synthetic: the real trigger is
+                                  #  below 20%; use --balloontest=5 to change it)
 ```
 
-Both modes are standalone: they print or write a file and exit without starting the tray icon.
+The first two modes are standalone: they print or write a file and exit without starting the tray
+icon. `--balloontest` shows the notification for a few seconds and exits; it can be run while the
+application is already running.
 
 ## Build from source
 

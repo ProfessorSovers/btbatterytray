@@ -18,7 +18,8 @@ use windows::Win32::UI::Shell::{
     NIIF_WARNING, NOTIFYICONDATAW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, PostMessageW, PostQuitMessage,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, PeekMessageW, PM_REMOVE,
+    PostMessageW, PostQuitMessage,
     RegisterClassW, TranslateMessage, HCURSOR, HICON, HMENU, WNDCLASSW, WM_APP, WM_CONTEXTMENU,
     WM_DESTROY, WM_LBUTTONUP, WM_RBUTTONUP, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, CW_USEDEFAULT,
 };
@@ -244,6 +245,31 @@ fn show_balloon(hwnd: HWND, name: &str, level: u8, language: Language) {
     }
 }
 
+/// Диагностика: показать настоящий баллун о низком заряде с заданным процентом.
+/// Реальный триггер — строго ниже LOW_BATTERY, поэтому на живой батарее 30% его
+/// не увидеть; здесь подменяется только процент, весь остальной путь — рабочий.
+fn demo_balloon(hwnd: HWND, level: u8, language: Language) {
+    let name = get_devices_with_battery(None)
+        .into_iter()
+        .next()
+        .map(|d| d.name)
+        .unwrap_or_else(|| "Demo device".to_string());
+    show_balloon(hwnd, &name, level, language);
+    log_line(&format!("balloontest: {} = {}%", name, level));
+    // держим процесс живым, пока висит баллун, и качаем сообщения окна
+    let until = std::time::Instant::now() + Duration::from_secs(8);
+    let mut msg = MSG::default();
+    while std::time::Instant::now() < until {
+        unsafe {
+            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// GUI-поток: применил свежие данные от worker'а (иконка, тултип, баллун, лог).
 fn ui_refresh(hwnd: HWND) {
     let devices = LAST_DEVICES.lock().unwrap().clone();
@@ -459,7 +485,7 @@ pub fn acquire_single_instance() -> bool {
     }
 }
 
-pub fn run() {
+pub fn run(demo_level: Option<u8>) {
     unsafe {
         let hinstance = match GetModuleHandleW(None) {
             Ok(h) => h,
@@ -528,6 +554,13 @@ pub fn run() {
             ..Default::default()
         };
         let _ = Shell_NotifyIconW(NIM_ADD, &nid);
+
+        // диагностический режим: показать баллун о низком заряде и выйти
+        if let Some(level) = demo_level {
+            demo_balloon(hwnd, level, load_language());
+            let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
+            return;
+        }
 
         *STATE.lock().unwrap() = Some(AppState {
             icon,
