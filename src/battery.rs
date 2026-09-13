@@ -9,6 +9,9 @@
 
 use std::collections::{HashMap, HashSet};
 
+use windows::Devices::Bluetooth::{
+    BluetoothConnectionStatus, BluetoothDevice, BluetoothLEDevice,
+};
 use winreg::enums::HKEY_LOCAL_MACHINE;
 use winreg::RegKey;
 
@@ -72,14 +75,17 @@ extern "system" {
     fn CM_Get_DevNode_Status(pulstatus: *mut u32, pulproblemnumber: *mut u32, dndevinst: i32, ulflags: u32) -> u32;
 }
 
-const DN_STARTED: u32 = 0x8; // драйвер запущен — устройство присутствует и подключено
+const DN_STARTED: u32 = 0x8; // драйвер запущен — узел живой
+const DN_DEVICE_DISCONNECTED: u32 = 0x0200_0000; // устройство сейчас не подключено к системе
 
-/// True, если devnode «стартовал» (устройство подключено и активно).
+/// True, если devnode «стартовал» (драйвер загружен). Это только ГРУБЫЙ предфильтр:
+/// у сопряжённых, но выключенных устройств Windows держит узлы живыми, поэтому
+/// «запущен» ≠ «подключён». Настоящая проверка — `filter_connected` (WinRT).
 fn devnode_connected(devinst: i32) -> bool {
     let mut status: u32 = 0;
     let mut problem: u32 = 0;
     let rc = unsafe { CM_Get_DevNode_Status(&mut status, &mut problem, devinst, 0) };
-    rc == CR_SUCCESS && status & DN_STARTED != 0
+    rc == CR_SUCCESS && status & DN_STARTED != 0 && status & DN_DEVICE_DISCONNECTED == 0
 }
 
 /// devinst по instance ID; None, если узел не найден (rc != 0).
@@ -292,4 +298,73 @@ pub fn get_devices_with_battery(connected_only: Option<&HashSet<String>>) -> Vec
     // сортировка по имени (case-insensitive)
     result.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     result
+}
+
+/// Оставляет только РЕАЛЬНО подключённые устройства.
+///
+/// Почему так: у сопряжённого, но выключенного устройства Windows держит devnode
+/// живым и отдаёт последний известный заряд из кэша драйвера — поэтому «узел есть +
+/// заряд читается» ещё не значит «подключено» (выключенный геймпад висел в меню).
+///
+/// Проверка — WinRT `ConnectionStatus` по адресу, но ТОЛЬКО для уже найденных
+/// кандидатов (обычно 1-3 устройства). Раньше WinRT перебирал ВСЕ сопряжённые
+/// устройства (FindAllAsync + FromIdAsync на каждое) — именно это и тормозило опрос
+/// на секунды, а не сама проверка статуса.
+///
+/// Fail-open: если WinRT не смог даже начать вызов (ошибка), устройство оставляем —
+/// иначе при сбое WinRT меню опустело бы целиком.
+pub fn filter_connected(devices: Vec<DeviceBattery>) -> Vec<DeviceBattery> {
+    devices.into_iter().filter(|d| address_connected(&d.address)).collect()
+}
+
+/// Служебный режим: печатает узлы с зарядом и вердикт проверки подключения.
+pub fn conn_test() {
+    let all = get_devices_with_battery(None);
+    let total = all.len();
+    println!("узлов с зарядом найдено: {}", total);
+    let t0 = std::time::Instant::now();
+    let mut passed = 0usize;
+    for d in &all {
+        let connected = address_connected(&d.address);
+        if connected {
+            passed += 1;
+        }
+        println!("  {}  {:<28} {:>3}%  connected={}", d.address, d.name, d.level, connected);
+    }
+    println!(
+        "проверка подключения: прошло {}/{} за {} ms",
+        passed,
+        total,
+        t0.elapsed().as_millis()
+    );
+}
+
+fn address_connected(address: &str) -> bool {
+    let Ok(addr) = u64::from_str_radix(address, 16) else {
+        return true; // не разобрали адрес — не прячем устройство
+    };
+    let mut winrt_alive = false;
+
+    // BLE (например, геймпад Xbox)
+    if let Ok(op) = BluetoothLEDevice::FromBluetoothAddressAsync(addr) {
+        winrt_alive = true;
+        if let Ok(dev) = op.get() {
+            if matches!(dev.ConnectionStatus(), Ok(BluetoothConnectionStatus::Connected)) {
+                return true;
+            }
+        }
+    }
+
+    // классика (наушники, колонки)
+    if let Ok(op) = BluetoothDevice::FromBluetoothAddressAsync(addr) {
+        winrt_alive = true;
+        if let Ok(dev) = op.get() {
+            if matches!(dev.ConnectionStatus(), Ok(BluetoothConnectionStatus::Connected)) {
+                return true;
+            }
+        }
+    }
+
+    // ни один вызов не стартовал — WinRT недоступен, не скрываем устройство
+    !winrt_alive
 }

@@ -25,7 +25,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use winreg::enums::*;
 use winreg::RegKey;
 
-use crate::battery::{get_devices_with_battery, DeviceBattery};
+use crate::battery::{filter_connected, get_devices_with_battery, DeviceBattery};
 use crate::icon::TrayIcon;
 use crate::menu::{localized_device_name, low_battery_message, low_battery_title, run_menu, tooltip_empty, tray_tooltip, Language, MenuAction, Theme};
 
@@ -348,11 +348,15 @@ fn worker_loop(hwnd: HWND) {
         }
         if REFRESH_NOW.swap(false, Ordering::SeqCst) || last.elapsed() >= POLL_PERIOD {
             last = Instant::now();
-            // Подключённость определяем прямо в CfgMgr32 (CM_Get_DevNode_Status),
-            // а не через блокирующие WinRT FindAllAsync().get() — иначе каждый опрос
-            // «зависает» на секунды и «Обновить сейчас» выглядит мёртвым.
-            let devices = get_devices_with_battery(None);
+            // Быстрый скан заряда через CfgMgr32 + точечная проверка подключения
+            // (WinRT ConnectionStatus) только по найденным кандидатам, а не перебором
+            // всех сопряжённых — перебор и тормозил опрос на секунды.
+            let t0 = Instant::now();
+            let devices = filter_connected(get_devices_with_battery(None));
+            let count = devices.len();
+            let elapsed = t0.elapsed().as_millis();
             *LAST_DEVICES.lock().unwrap() = devices;
+            log_line(&format!("poll: устройств {} за {} ms", count, elapsed));
             if !STOP_WORKER.load(Ordering::Acquire) {
                 unsafe {
                     let _ = PostMessageW(hwnd, WM_REFRESHED, WPARAM(0), LPARAM(0));

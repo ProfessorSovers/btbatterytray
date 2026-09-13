@@ -18,6 +18,12 @@ fn main() {
         return;
     }
 
+    // служебный режим: что система считает подключённым (проверка фильтра)
+    if args.iter().any(|a| a == "--conntest") {
+        battery::conn_test();
+        return;
+    }
+
     if !app::acquire_single_instance() {
         return; // уже запущено
     }
