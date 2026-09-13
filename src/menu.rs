@@ -669,6 +669,8 @@ struct MenuState {
     open_submenu: Option<SubmenuKind>,
     submenu_top: i32,
     theme: Theme,
+    /// Родитель просит закрыть открытое подменю (курсор вернулся в основное окно).
+    close_child: bool,
 }
 
 /// Закрывает меню: помечает done, сохраняет результат, снимает хук,
@@ -745,20 +747,30 @@ unsafe extern "system" fn menu_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
         }
         WM_MOUSEMOVE => {
                     let (x, y) = client_pos(lparam);
-                    // Внешний клик вне popup-группы закрывает меню через глобальный
-                    // mouse-hook (WM_HOOK_CLOSE). Здесь не закрываем окно по выходу
-                    // курсора: при открытии дочернего меню курсор переходит на соседнее
-                    // окно группы, и это не должно закрывать ни parent, ни child.
+                    // Клик вне popup-группы закрывает меню через глобальный mouse-hook
+                    // (WM_HOOK_CLOSE). По выходу курсора окно здесь не закрываем: при
+                    // открытии подменю курсор переходит на соседнее окно группы.
                     if x < 0 || y < 0 || x >= state.width || y >= state.height {
                         return LRESULT(0);
                     }
                     let hover = hit_test(&state.items, y, state.height);
+                    let on_submenu = hover >= 0
+                        && (hover as usize) < state.items.len()
+                        && state.items[hover as usize].kind == ItemKind::Submenu;
+                    // Курсор вернулся в ОСНОВНОЕ окно. Если открытое подменю принадлежит
+                    // другому пункту (или курсор вообще не на пункте подменю) — просим
+                    // цикл закрыть подменю и вернуть управление родителю (как в нативных меню).
+                    if hwnd.0 as isize == GROUP_PARENT.load(Ordering::SeqCst)
+                        && HOOK_CHILD_HWND.load(Ordering::SeqCst) != 0
+                    {
+                        let hover_top = if on_submenu { item_top(&state.items, hover as usize) } else { -1 };
+                        if hover_top != state.submenu_top {
+                            state.close_child = true;
+                        }
+                    }
                     if hover != state.hover {
                         state.hover = hover;
                         // подменю — открывается при наведении (с задержкой, как нативные)
-                let on_submenu = hover >= 0
-                    && (hover as usize) < state.items.len()
-                    && state.items[hover as usize].kind == ItemKind::Submenu;
                 if on_submenu {
                     let _ = SetTimer(hwnd, SUBMENU_HOVER_TIMER, SUBMENU_HOVER_MS, None);
                 } else {
@@ -929,6 +941,7 @@ unsafe fn create_popup(items: Vec<MenuItem>, x: i32, y: i32, theme: Theme) -> Po
         open_submenu: None,
         submenu_top: 1,
         theme,
+        close_child: false,
     });
     let state_ptr: *mut MenuState = &mut *state;
     let _ = SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr as isize);
@@ -1056,6 +1069,20 @@ pub fn run_menu(devices: &[DeviceBattery], target: &str, target_name: &str, auto
                                         HOOK_HWND.store(parent_hwnd.0 as isize, Ordering::SeqCst);
                                     }
                                 }
+            }
+            if parent_state.close_child {
+                // Курсор вернулся в основное окно: закрываем ТОЛЬКО подменю,
+                // родитель остаётся жив и снова доступен для кликов.
+                parent_state.close_child = false;
+                if let Some(old_child) = child.take() {
+                    HOOK_CHILD_HWND.store(0, Ordering::SeqCst);
+                    destroy_kept_popup(old_child);
+                }
+                // suspend_menu пометил родителя done при открытии подменю — снимаем
+                // метку, иначе цикл закроет и родителя вместе с подменю.
+                if matches!(parent_state.result, MenuAction::None) {
+                    parent_state.done = false;
+                }
             }
             // Порядок важен: сначала забираем УЖЕ СДЕЛАННЫЙ выбор (иначе результат
             // теряется), и только потом реагируем на закрытие группы вне выбора.
