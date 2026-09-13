@@ -1,4 +1,7 @@
-# BtBatteryTray
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/logo-light.png">
+  <img alt="BtBatteryTray" src="docs/logo-dark.png" width="420">
+</picture>
 
 **English** · [Русский](README.ru.md) · [Українська](README.uk.md)
 
