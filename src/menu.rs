@@ -540,7 +540,11 @@ fn item_top(items: &[MenuItem], index: usize) -> i32 {
 /// отмеченная точка — цветом текста. Раньше рисовалось 1px пером без сглаживания
 /// и выглядело как «отверстие от выстрела».
 unsafe fn draw_radio(hdc: HDC, cx: i32, cy: i32, checked: bool, color: COLORREF, dim: COLORREF) {
-    const D: i32 = 12; // диаметр кольца
+    // Диаметр НЕЧЁТНЫЙ: при чётном диаметре центр круга попадает между пикселями,
+    // и точка внутри садится со смещением на полпикселя. С нечётным размером
+    // центр кольца и центр точки совпадают с одним и тем же пикселем.
+    const D: i32 = 11; // диаметр кольца
+    const DOT: i32 = 5; // диаметр точки
 
     aa_draw(hdc, cx - D / 2, cy - D / 2, D, D, dim, |mem: HDC, ss: i32| unsafe {
         let old_pen = SelectObject(mem, GetStockObject(NULL_PEN));
@@ -562,7 +566,6 @@ unsafe fn draw_radio(hdc: HDC, cx: i32, cy: i32, checked: bool, color: COLORREF,
         return;
     }
 
-    const DOT: i32 = 5; // диаметр точки
     aa_draw(hdc, cx - DOT / 2, cy - DOT / 2, DOT, DOT, color, |mem: HDC, ss: i32| unsafe {
         let old_pen = SelectObject(mem, GetStockObject(NULL_PEN));
         let white = CreateSolidBrush(COLORREF(0x00FF_FFFF));
