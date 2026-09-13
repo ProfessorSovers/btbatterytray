@@ -1,5 +1,9 @@
 # Rust build output
 /target/
+/target-*/
+
+# Local packaged test builds
+*.exe
 
 # Local machine-specific Cargo linker configuration
 /.cargo/config.toml
