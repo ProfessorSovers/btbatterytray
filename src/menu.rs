@@ -543,7 +543,8 @@ unsafe fn draw_radio(hdc: HDC, cx: i32, cy: i32, checked: bool, color: COLORREF,
     // Диаметр НЕЧЁТНЫЙ: при чётном диаметре центр круга попадает между пикселями,
     // и точка внутри садится со смещением на полпикселя. С нечётным размером
     // центр кольца и центр точки совпадают с одним и тем же пикселем.
-    const D: i32 = 11; // диаметр кольца
+    // Стенка тонкая (1 px): толстая стенка визуально сливалась с точкой.
+    const D: i32 = 13; // диаметр кольца (совпадает с боксом чекбокса)
     const DOT: i32 = 5; // диаметр точки
 
     aa_draw(hdc, cx - D / 2, cy - D / 2, D, D, dim, |mem: HDC, ss: i32| unsafe {
@@ -551,10 +552,10 @@ unsafe fn draw_radio(hdc: HDC, cx: i32, cy: i32, checked: bool, color: COLORREF,
         let white = CreateSolidBrush(COLORREF(0x00FF_FFFF));
         let old_br = SelectObject(mem, white);
         let _ = Ellipse(mem, 0, 0, D * ss, D * ss);
-        // вырезаем середину чёрным → получаем кольцо толщиной 2 px
+        // вырезаем середину чёрным → кольцо толщиной 1 px
         let black = CreateSolidBrush(COLORREF(0x0000_0000));
         let old_br2 = SelectObject(mem, black);
-        let _ = Ellipse(mem, 2 * ss, 2 * ss, (D - 2) * ss, (D - 2) * ss);
+        let _ = Ellipse(mem, ss, ss, (D - 1) * ss, (D - 1) * ss);
         let _ = SelectObject(mem, old_br2);
         let _ = DeleteObject(black);
         let _ = SelectObject(mem, old_br);
