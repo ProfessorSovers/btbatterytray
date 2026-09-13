@@ -536,29 +536,48 @@ fn item_top(items: &[MenuItem], index: usize) -> i32 {
 
 // ---------- отрисовка (общая для окна и render_test) ----------
 
-unsafe fn draw_radio(hdc: HDC, cx: i32, cy: i32, checked: bool, color: COLORREF) {
-    let pen = CreatePen(PS_SOLID, 1, color);
-    let old_pen = SelectObject(hdc, pen);
-    let hollow = GetStockObject(NULL_BRUSH);
-    let old_br = SelectObject(hdc, hollow);
-    // кружок
-    let _ = Ellipse(hdc, cx - 6, cy - 6, cx + 6, cy + 6);
-    if checked {
-        // точка внутри
-        let br = CreateSolidBrush(color);
-        let old2 = SelectObject(hdc, br);
-        let _ = Ellipse(hdc, cx - 2, cy - 2, cx + 2, cy + 2);
-        let _ = SelectObject(hdc, old2);
-        let _ = DeleteObject(br);
+/// Радио-кнопка: сглаженное кольцо + точка внутри. Кольцо приглушённое (dim),
+/// отмеченная точка — цветом текста. Раньше рисовалось 1px пером без сглаживания
+/// и выглядело как «отверстие от выстрела».
+unsafe fn draw_radio(hdc: HDC, cx: i32, cy: i32, checked: bool, color: COLORREF, dim: COLORREF) {
+    const D: i32 = 12; // диаметр кольца
+
+    aa_draw(hdc, cx - D / 2, cy - D / 2, D, D, dim, |mem: HDC, ss: i32| unsafe {
+        let old_pen = SelectObject(mem, GetStockObject(NULL_PEN));
+        let white = CreateSolidBrush(COLORREF(0x00FF_FFFF));
+        let old_br = SelectObject(mem, white);
+        let _ = Ellipse(mem, 0, 0, D * ss, D * ss);
+        // вырезаем середину чёрным → получаем кольцо толщиной 2 px
+        let black = CreateSolidBrush(COLORREF(0x0000_0000));
+        let old_br2 = SelectObject(mem, black);
+        let _ = Ellipse(mem, 2 * ss, 2 * ss, (D - 2) * ss, (D - 2) * ss);
+        let _ = SelectObject(mem, old_br2);
+        let _ = DeleteObject(black);
+        let _ = SelectObject(mem, old_br);
+        let _ = DeleteObject(white);
+        let _ = SelectObject(mem, old_pen);
+    });
+
+    if !checked {
+        return;
     }
-    let _ = SelectObject(hdc, old_br);
-    let _ = SelectObject(hdc, old_pen);
-    let _ = DeleteObject(pen);
+
+    const DOT: i32 = 5; // диаметр точки
+    aa_draw(hdc, cx - DOT / 2, cy - DOT / 2, DOT, DOT, color, |mem: HDC, ss: i32| unsafe {
+        let old_pen = SelectObject(mem, GetStockObject(NULL_PEN));
+        let white = CreateSolidBrush(COLORREF(0x00FF_FFFF));
+        let old_br = SelectObject(mem, white);
+        let _ = Ellipse(mem, 0, 0, DOT * ss, DOT * ss);
+        let _ = SelectObject(mem, old_br);
+        let _ = DeleteObject(white);
+        let _ = SelectObject(mem, old_pen);
+    });
 }
 
-unsafe fn draw_check(hdc: HDC, cx: i32, cy: i32, checked: bool, color: COLORREF) {
-    // рамка чекбокса: ровные 1px линии, сглаживание тут только размыло бы края
-    let pen = CreatePen(PS_SOLID, 1, color);
+/// Чекбокс: приглушённая рамка (dim) + сглаженная жирная галка цветом текста.
+unsafe fn draw_check(hdc: HDC, cx: i32, cy: i32, checked: bool, color: COLORREF, dim: COLORREF) {
+    // рамка: ровные 1px линии приглушённым цветом — не конкурирует с галкой
+    let pen = CreatePen(PS_SOLID, 1, dim);
     let old_pen = SelectObject(hdc, pen);
     let hollow = GetStockObject(NULL_BRUSH);
     let old_br = SelectObject(hdc, hollow);
@@ -761,8 +780,8 @@ unsafe fn paint_menu(hdc: HDC, items: &[MenuItem], hover: i32, font: HFONT, widt
         let cx = GLYPH_ZONE / 2 + 1;
         let cy = y + ITEM_H / 2;
         match &it.kind {
-            ItemKind::Radio(checked) => draw_radio(hdc, cx, cy, *checked, item_color),
-            ItemKind::Check(checked) => draw_check(hdc, cx, cy, *checked, item_color),
+            ItemKind::Radio(checked) => draw_radio(hdc, cx, cy, *checked, item_color, colors.disabled),
+            ItemKind::Check(checked) => draw_check(hdc, cx, cy, *checked, item_color, colors.disabled),
             ItemKind::Submenu => draw_arrow(hdc, cx, cy, item_color),
             _ => {}
         }
@@ -1257,27 +1276,12 @@ fn write_bmp(path: &str, width: i32, height: i32, topdown: &[u8]) -> std::io::Re
     std::fs::write(path, buf)
 }
 
-/// Служебный режим: рисует меню в menu_test.bmp (для пиксельной проверки цветов).
-pub fn render_test() {
-    let devices = vec![
-        DeviceBattery {
-            address: "AABBCCDDEE01".to_string(),
-            name: "1MORE SonoFlow".to_string(),
-            level: 90,
-        },
-        DeviceBattery {
-            address: "AABBCCDDEE02".to_string(),
-            name: "Xbox Wireless Controller".to_string(),
-            level: 72,
-        },
-    ];
-    // target строчными буквами — проверка case-insensitive совпадения адреса
-    let items = build_items(&devices, "aabbccddee01", "1MORE SonoFlow", true, Language::English);
-
-    unsafe {
+/// Пишет набор пунктов в BMP (для пиксельной проверки отрисовки).
+unsafe fn render_items_to_bmp(items: &[MenuItem], path: &str, theme: Theme) {
+    {
         let screen = GetDC(None);
         let font = create_menu_font();
-        let (width, height) = measure(&items, screen, font);
+        let (width, height) = measure(items, screen, font);
 
         // 32bpp BGRA, top-down (biHeight отрицательный)
         let mut bmi = BITMAPINFO {
@@ -1306,7 +1310,7 @@ pub fn render_test() {
         let old_bmp = SelectObject(mem, hbmp);
 
         // общий код отрисовки, без hover
-        paint_menu(mem, &items, -1, font, width, height, Theme::Dark);
+        paint_menu(mem, items, -1, font, width, height, theme);
 
         let n = match (width as usize)
             .checked_mul(height as usize)
@@ -1332,9 +1336,9 @@ pub fn render_test() {
         }
         let pixels = std::slice::from_raw_parts(bits as *const u8, n);
 
-        match write_bmp("menu_test.bmp", width, height, pixels) {
-            Ok(()) => println!("menu_test.bmp: {}x{} px, {} bytes", width, height, n),
-            Err(e) => println!("menu_test.bmp: ошибка записи: {}", e),
+        match write_bmp(path, width, height, pixels) {
+            Ok(()) => println!("{}: {}x{} px, {} bytes", path, width, height, n),
+            Err(e) => println!("{}: ошибка записи: {}", path, e),
         }
 
         let _ = SelectObject(mem, old_bmp);
@@ -1342,5 +1346,29 @@ pub fn render_test() {
         let _ = DeleteDC(mem);
         let _ = ReleaseDC(None, screen);
         let _ = DeleteObject(font);
+    }
+}
+
+/// Служебный режим: рисует главное меню и подменю в BMP (пиксельная проверка).
+pub fn render_test() {
+    let devices = vec![
+        DeviceBattery {
+            address: "AABBCCDDEE01".to_string(),
+            name: "1MORE SonoFlow".to_string(),
+            level: 90,
+        },
+        DeviceBattery {
+            address: "AABBCCDDEE02".to_string(),
+            name: "Xbox Wireless Controller".to_string(),
+            level: 72,
+        },
+    ];
+    // target строчными буквами — проверка case-insensitive совпадения адреса
+    let main = build_items(&devices, "aabbccddee01", "1MORE SonoFlow", true, Language::English);
+    // подменю с radio: English отмечен, Russian/Ukrainian — пустые кольца
+    let submenu = build_language_items(Language::English);
+    unsafe {
+        render_items_to_bmp(&main, "menu_test.bmp", Theme::Dark);
+        render_items_to_bmp(&submenu, "submenu_test.bmp", Theme::Dark);
     }
 }
