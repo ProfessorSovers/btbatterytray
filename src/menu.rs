@@ -23,15 +23,15 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
-    GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GWLP_USERDATA, HCURSOR, HHOOK, HICON, HMENU,
-    IDC_ARROW, KillTimer, LoadCursorW, MSG, PostMessageW,
+    GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GWLP_USERDATA, HCURSOR, HHOOK, HICON, HMENU,
+    IDC_ARROW, KillTimer, LoadCursorW, MA_NOACTIVATE, MSG, PostMessageW,
     RegisterClassW, SetCursor, SetTimer, SetWindowsHookExW, SetWindowLongPtrW, SetWindowPos,
     ShowWindow, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOWNA,
     TranslateMessage, UnhookWindowsHookEx, WH_MOUSE_LL,
     WindowFromPoint, WNDCLASSW, WM_ACTIVATE, WM_APP, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::battery::DeviceBattery;
@@ -245,7 +245,6 @@ const WM_TRAY: u32 = WM_APP + 1; // клик по иконке трея (как 
 const WM_HOOK_CLOSE: u32 = WM_APP + 9; // хук мыши: клик вне меню → закрыть
 const SUBMENU_HOVER_TIMER: usize = 0x52; // таймер открытия подменю при наведении
 const SUBMENU_HOVER_MS: u32 = 300; // задержка как у нативных меню (MenuShowDelay)
-const FOCUS_CHECK_TIMER: usize = 0x53;
 
 // Хук мыши (WH_MOUSE_LL) — единственный надёжный способ закрывать меню по клику вне
 // окна: захват мыши (SetCapture) на этой системе не редиректит клики в меню.
@@ -655,21 +654,13 @@ unsafe extern "system" fn menu_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
     let state = &mut *(userdata as *mut MenuState);
 
     match msg {
-        // Parent activation is lost normally when a submenu becomes active.  The
-        // cursor/group checks below are authoritative; closing here races the
-        // child's activation and closes both popups during the hand-off.
-        WM_ACTIVATE => LRESULT(0),
-        WM_TIMER if wparam.0 as usize == FOCUS_CHECK_TIMER => {
-            let mut pt = POINT::default();
-            let _ = GetCursorPos(&mut pt);
-            let under = WindowFromPoint(pt);
-            let child = HOOK_CHILD_HWND.load(Ordering::SeqCst);
-            if under.0 as isize != hwnd.0 as isize && under.0 as isize != child {
-                close_menu(hwnd, state, MenuAction::None);
-            }
-            LRESULT(0)
-        }
-        WM_MOUSEACTIVATE => DefWindowProcW(hwnd, msg, wparam, lparam),
+            // Эти окна не должны перехватывать фокус/активацию у приложения.
+            // Закрытие popup-группы выполняется по клику вне окна через глобальный
+            // mouse-hook (WM_HOOK_CLOSE), по Esc и по WM_CLOSE. Фокус-события
+            // игнорируются: подменю открывается по hover/click без смены фокуса,
+            // поэтому активация не может закрыть дочернее окно во время hand-off.
+            WM_ACTIVATE => LRESULT(0),
+            WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
         WM_ERASEBKGND => LRESULT(1), // фон рисуем в WM_PAINT целиком
         WM_SETCURSOR => {
             // всегда обычная стрелка — никаких busy/loading-курсоров
@@ -686,19 +677,18 @@ unsafe extern "system" fn menu_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
             LRESULT(0)
         }
         WM_MOUSEMOVE => {
-            let (x, y) = client_pos(lparam);
-            if x < 0 || y < 0 || x >= state.width || y >= state.height {
-                close_menu(hwnd, state, MenuAction::None);
-                return LRESULT(0);
-            }
-            let hover = if x < 0 || y < 0 || x >= state.width || y >= state.height {
-                -1
-            } else {
-                hit_test(&state.items, y, state.height)
-            };
-            if hover != state.hover {
-                state.hover = hover;
-                // подменю «Цель» — открывается при наведении (с задержкой, как нативные)
+                    let (x, y) = client_pos(lparam);
+                    // Внешний клик вне popup-группы закрывает меню через глобальный
+                    // mouse-hook (WM_HOOK_CLOSE). Здесь не закрываем окно по выходу
+                    // курсора: при открытии дочернего меню курсор переходит на соседнее
+                    // окно группы, и это не должно закрывать ни parent, ни child.
+                    if x < 0 || y < 0 || x >= state.width || y >= state.height {
+                        return LRESULT(0);
+                    }
+                    let hover = hit_test(&state.items, y, state.height);
+                    if hover != state.hover {
+                        state.hover = hover;
+                        // подменю — открывается при наведении (с задержкой, как нативные)
                 let on_submenu = hover >= 0
                     && (hover as usize) < state.items.len()
                     && state.items[hover as usize].kind == ItemKind::Submenu;
@@ -840,8 +830,8 @@ unsafe fn create_popup(items: Vec<MenuItem>, x: i32, y: i32, theme: Theme) -> Po
 
     // окно-попап
     let hwnd = match CreateWindowExW(
-        WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
-        w!("BtBatteryTray_PopupMenu"),
+            WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+            w!("BtBatteryTray_PopupMenu"),
         w!(""),
         WS_POPUP,
         x,
@@ -878,8 +868,7 @@ unsafe fn create_popup(items: Vec<MenuItem>, x: i32, y: i32, theme: Theme) -> Po
     // Показ без активации. Единственный глобальный хук принадлежит run_menu;
     // создание дочернего popup не должно перезаписывать HWND родителя.
     let _ = ShowWindow(hwnd, SW_SHOWNA);
-    let _ = SetTimer(hwnd, FOCUS_CHECK_TIMER, 100, None);
-    let _ = UpdateWindow(hwnd);
+        let _ = UpdateWindow(hwnd);
 
     PopupResult {
         action: MenuAction::None,
@@ -893,9 +882,8 @@ unsafe fn create_popup(items: Vec<MenuItem>, x: i32, y: i32, theme: Theme) -> Po
 
 unsafe fn destroy_kept_popup(mut popup: PopupResult) {
     let Some(hwnd) = popup.window else { return; };
-    let _ = KillTimer(hwnd, FOCUS_CHECK_TIMER);
-    let _ = KillTimer(hwnd, SUBMENU_HOVER_TIMER);
-    let _ = SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        let _ = KillTimer(hwnd, SUBMENU_HOVER_TIMER);
+        let _ = SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
     let _ = DestroyWindow(hwnd);
     if let Some(state) = popup.state.take() {
         let font = state.font;
@@ -951,7 +939,15 @@ pub fn run_menu(devices: &[DeviceBattery], target: &str, target_name: &str, auto
                 if px!=parent.x {let _=SetWindowPos(parent_hwnd,HWND::default(),px,parent.y,0,0,SWP_NOACTIVATE|SWP_NOSIZE|SWP_NOZORDER);parent.x=px;}
                 let sy=(parent.y+parent_state.submenu_top-1).min((GetSystemMetrics(SM_CYSCREEN)-sh).max(0));
                 child=Some(create_popup(sub_items,parent.x-sw,sy,theme));
-                HOOK_CHILD_HWND.store(child.as_ref().and_then(|p| p.window).map(|h| h.0 as isize).unwrap_or(0), Ordering::SeqCst);
+                                HOOK_CHILD_HWND.store(child.as_ref().and_then(|p| p.window).map(|h| h.0 as isize).unwrap_or(0), Ordering::SeqCst);
+                                // suspend_menu при открытии подменю снял глобальный хук. Возвращаем
+                                // его, чтобы клик вне popup-группы по-прежнему закрывал меню.
+                                if HOOK_HANDLE.load(Ordering::SeqCst) == 0 {
+                                    if let Ok(h) = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), None, 0) {
+                                        HOOK_HANDLE.store(h.0 as isize, Ordering::SeqCst);
+                                        HOOK_HWND.store(parent_hwnd.0 as isize, Ordering::SeqCst);
+                                    }
+                                }
             }
             if parent_state.done && child.is_none() {result=parent_state.result.clone();break;}
             if let Some(c)=child.as_mut() {if let Some(st)=c.state.as_mut(){if st.done {result=st.result.clone();break;}}}
