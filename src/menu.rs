@@ -567,11 +567,17 @@ unsafe fn draw_radio(hdc: HDC, cx: i32, cy: i32, checked: bool, color: COLORREF,
         return;
     }
 
-    aa_draw(hdc, cx - DOT / 2, cy - DOT / 2, DOT, DOT, color, |mem: HDC, ss: i32| unsafe {
+    // Точка рисуется в ТОЙ ЖЕ коробке D×D, что и кольцо, а не в своей 5×5:
+    // тогда оба эллипса получают одинаковое округление GDI и центры совпадают
+    // по построению. Раньше точка шла со своим округлением и садилась на
+    // полпикселя вбок, что читалось как «точка не по центру».
+    aa_draw(hdc, cx - D / 2, cy - D / 2, D, D, color, |mem: HDC, ss: i32| unsafe {
         let old_pen = SelectObject(mem, GetStockObject(NULL_PEN));
         let white = CreateSolidBrush(COLORREF(0x00FF_FFFF));
         let old_br = SelectObject(mem, white);
-        let _ = Ellipse(mem, 0, 0, DOT * ss, DOT * ss);
+        let a = (D - DOT) * ss / 2;
+        let b = (D + DOT) * ss / 2;
+        let _ = Ellipse(mem, a, a, b, b);
         let _ = SelectObject(mem, old_br);
         let _ = DeleteObject(white);
         let _ = SelectObject(mem, old_pen);
@@ -597,7 +603,7 @@ unsafe fn draw_check(hdc: HDC, cx: i32, cy: i32, checked: bool, color: COLORREF,
     // галочка: толстый штрих, заполняющий почти весь бокс (раньше — тонкие 1px
     // линии в середине). Рисуется через aa_draw, поэтому кромки сглажены.
     const BW: i32 = 12; // сторона бокса
-    const TH: i32 = 3; // толщина штриха
+    const TH: i32 = 2; // толщина штриха
     aa_draw(hdc, cx - BW / 2, cy - BW / 2, BW, BW, color, |mem: HDC, ss: i32| unsafe {
         let pen = CreatePen(PS_SOLID, TH * ss, COLORREF(0x00FF_FFFF));
         let old_pen = SelectObject(mem, pen);
