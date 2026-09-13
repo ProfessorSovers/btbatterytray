@@ -144,9 +144,6 @@ pub fn localized_device_name(language: Language, name: &str) -> &str {
 
 fn text(language: Language, key: &str) -> &'static str {
     match (language, key) {
-        (Language::English, "updated") => "Updated",
-        (Language::Russian, "updated") => "Обновлено",
-        (Language::Ukrainian, "updated") => "Оновлено",
         (Language::English, "no_devices") => "No connected devices",
         (Language::Russian, "no_devices") => "Подключённых устройств нет",
         (Language::Ukrainian, "no_devices") => "Підключених пристроїв немає",
@@ -407,9 +404,8 @@ impl MenuItem {
 }
 
 /// Собирает плоский список пунктов главного меню.
-fn build_items(devices: &[DeviceBattery], target: &str, target_name: &str, autostart: bool, updated: &str, language: Language) -> Vec<MenuItem> {
+fn build_items(devices: &[DeviceBattery], target: &str, target_name: &str, autostart: bool, language: Language) -> Vec<MenuItem> {
     let mut items = Vec::new();
-    items.push(MenuItem::info(format!("{}: {}", text(language, "updated"), updated)));
     if devices.is_empty() {
         items.push(MenuItem::info(text(language, "no_devices").to_string()));
     } else {
@@ -561,40 +557,49 @@ unsafe fn draw_radio(hdc: HDC, cx: i32, cy: i32, checked: bool, color: COLORREF)
 }
 
 unsafe fn draw_check(hdc: HDC, cx: i32, cy: i32, checked: bool, color: COLORREF) {
+    // рамка чекбокса: ровные 1px линии, сглаживание тут только размыло бы края
     let pen = CreatePen(PS_SOLID, 1, color);
     let old_pen = SelectObject(hdc, pen);
     let hollow = GetStockObject(NULL_BRUSH);
     let old_br = SelectObject(hdc, hollow);
-    // квадратик
     let _ = Rectangle(hdc, cx - 6, cy - 6, cx + 6, cy + 6);
-    if checked {
-        // галочка
-        let _ = MoveToEx(hdc, cx - 4, cy, None);
-        let _ = LineTo(hdc, cx - 1, cy + 3);
-        let _ = LineTo(hdc, cx + 4, cy - 3);
-    }
     let _ = SelectObject(hdc, old_br);
     let _ = SelectObject(hdc, old_pen);
     let _ = DeleteObject(pen);
+
+    if !checked {
+        return;
+    }
+
+    // галочка: толстый штрих, заполняющий почти весь бокс (раньше — тонкие 1px
+    // линии в середине). Рисуется через aa_draw, поэтому кромки сглажены.
+    const BW: i32 = 12; // сторона бокса
+    const TH: i32 = 3; // толщина штриха
+    aa_draw(hdc, cx - BW / 2, cy - BW / 2, BW, BW, color, |mem: HDC, ss: i32| unsafe {
+        let pen = CreatePen(PS_SOLID, TH * ss, COLORREF(0x00FF_FFFF));
+        let old_pen = SelectObject(mem, pen);
+        let _ = MoveToEx(mem, 3 * ss, 6 * ss, None);
+        let _ = LineTo(mem, 5 * ss, 9 * ss);
+        let _ = LineTo(mem, 10 * ss, 3 * ss);
+        let _ = SelectObject(mem, old_pen);
+        let _ = DeleteObject(pen);
+    });
 }
 
-/// Стрелка подменю: сглаженный треугольник, направленный влево.
-/// GDI не умеет антиалиасинг у `Polygon`, поэтому фигура рисуется в 4× увеличенном
-/// 32-битном DIB, блок 4×4 усредняется в покрытие 0..255, и результат накладывается
-/// `AlphaBlend` с premultiplied-альфой. Обводка не рисуется (NULL_PEN): контур
-/// текущим пером рамки ранее «съедал» заливку на таком мелком размере.
-unsafe fn draw_arrow(hdc: HDC, cx: i32, cy: i32, color: COLORREF) {
+/// Рисует фигуру со сглаживанием: 4× суперсэмплинг в 32-битный DIB, усреднение
+/// блока 4×4 в покрытие 0..255 и наложение `AlphaBlend` (premultiplied-альфа).
+/// GDI не умеет антиалиасинг сам, поэтому `draw` рисует фигуру БЕЛЫМ на чёрном
+/// в увеличенном буфере; координаты внутри — локальные, умноженные на `ss`.
+unsafe fn aa_draw(hdc: HDC, x: i32, y: i32, w: i32, h: i32, color: COLORREF, draw: impl FnOnce(HDC, i32)) {
     const SS: i32 = 4; // коэффициент суперсэмплинга
-    const AW: i32 = 6; // ширина: острие → основание
-    const AH: i32 = 8; // высота
 
     let mem = CreateCompatibleDC(hdc);
     if mem.is_invalid() {
         return;
     }
 
-    let bw = AW * SS;
-    let bh = AH * SS;
+    let bw = w * SS;
+    let bh = h * SS;
     let mut bmi = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
             biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
@@ -624,26 +629,15 @@ unsafe fn draw_arrow(hdc: HDC, cx: i32, cy: i32, color: COLORREF) {
     let src = bits as *mut u8;
     std::ptr::write_bytes(src, 0, (bw * bh * 4) as usize);
 
-    // маска: белый треугольник на чёрном фоне
-    let white = CreateSolidBrush(COLORREF(0x00FF_FFFF));
-    let old_brush = SelectObject(mem, white);
-    let old_pen = SelectObject(mem, GetStockObject(NULL_PEN));
-    let pts = [
-        POINT { x: bw, y: 0 },
-        POINT { x: 0, y: bh / 2 },
-        POINT { x: bw, y: bh },
-    ];
-    let _ = Polygon(mem, &pts);
-    let _ = SelectObject(mem, old_pen);
-    let _ = SelectObject(mem, old_brush);
-    let _ = DeleteObject(white);
+    // маска: белая фигура на чёрном фоне
+    draw(mem, SS);
 
     // усреднение 4×4 → premultiplied BGRA (AC_SRC_ALPHA требует premultiplied)
     let c = color.0;
     let (r, g, b) = ((c & 0xFF) as u32, ((c >> 8) & 0xFF) as u32, ((c >> 16) & 0xFF) as u32);
-    let mut out = vec![0u8; (AW * AH * 4) as usize];
-    for j in 0..AH {
-        for i in 0..AW {
+    let mut out = vec![0u8; (w * h * 4) as usize];
+    for j in 0..h {
+        for i in 0..w {
             let mut sum = 0u32;
             for dy in 0..SS {
                 for dx in 0..SS {
@@ -652,7 +646,7 @@ unsafe fn draw_arrow(hdc: HDC, cx: i32, cy: i32, color: COLORREF) {
                 }
             }
             let cov = sum / (SS * SS) as u32; // 0..255
-            let idx = ((j * AW + i) * 4) as usize;
+            let idx = ((j * w + i) * 4) as usize;
             out[idx] = (b * cov / 255) as u8;
             out[idx + 1] = (g * cov / 255) as u8;
             out[idx + 2] = (r * cov / 255) as u8;
@@ -660,9 +654,9 @@ unsafe fn draw_arrow(hdc: HDC, cx: i32, cy: i32, color: COLORREF) {
         }
     }
     // уменьшенная картинка кладётся в начало того же DIB (он top-down, шаг bw*4)
-    for j in 0..AH {
-        for i in 0..AW {
-            let s = ((j * AW + i) * 4) as usize;
+    for j in 0..h {
+        for i in 0..w {
+            let s = ((j * w + i) * 4) as usize;
             let d = ((j * bw + i) * 4) as usize;
             for k in 0..4 {
                 *src.add(d + k) = out[s + k];
@@ -676,11 +670,32 @@ unsafe fn draw_arrow(hdc: HDC, cx: i32, cy: i32, color: COLORREF) {
         SourceConstantAlpha: 255,
         AlphaFormat: AC_SRC_ALPHA as u8,
     };
-    let _ = AlphaBlend(hdc, cx - AW / 2, cy - AH / 2, AW, AH, mem, 0, 0, AW, AH, blend);
+    let _ = AlphaBlend(hdc, x, y, w, h, mem, 0, 0, w, h, blend);
 
     let _ = SelectObject(mem, old_bmp);
     let _ = DeleteObject(bmp);
     let _ = DeleteDC(mem);
+}
+
+/// Стрелка подменю: сглаженный треугольник, направленный влево.
+unsafe fn draw_arrow(hdc: HDC, cx: i32, cy: i32, color: COLORREF) {
+    const AW: i32 = 6; // ширина: острие → основание
+    const AH: i32 = 8; // высота
+    aa_draw(hdc, cx - AW / 2, cy - AH / 2, AW, AH, color, |mem: HDC, ss: i32| unsafe {
+        let white = CreateSolidBrush(COLORREF(0x00FF_FFFF));
+        let old_brush = SelectObject(mem, white);
+        // обводка не нужна, иначе контур другим цветом «съедает» заливку
+        let old_pen = SelectObject(mem, GetStockObject(NULL_PEN));
+        let pts = [
+            POINT { x: AW * ss, y: 0 },
+            POINT { x: 0, y: AH * ss / 2 },
+            POINT { x: AW * ss, y: AH * ss },
+        ];
+        let _ = Polygon(mem, &pts);
+        let _ = SelectObject(mem, old_pen);
+        let _ = SelectObject(mem, old_brush);
+        let _ = DeleteObject(white);
+    });
 }
 
 /// Рисует всё меню в hdc. hover: индекс подсвеченного пункта (−1 = нет).
@@ -1087,8 +1102,7 @@ pub fn run_menu(devices: &[DeviceBattery], target: &str, target_name: &str, auto
     if MENU_ACTIVE.swap(true, Ordering::SeqCst) {
         return MenuAction::None;
     }
-    let updated = chrono::Local::now().format("%H:%M:%S").to_string();
-    let items = build_items(devices, target, target_name, autostart, &updated, language);
+    let items = build_items(devices, target, target_name, autostart, language);
     unsafe {
         let mut pt = POINT::default(); let _ = GetCursorPos(&mut pt);
         let mut parent = create_popup(items, pt.x - 4, pt.y - 4, theme);
@@ -1258,7 +1272,7 @@ pub fn render_test() {
         },
     ];
     // target строчными буквами — проверка case-insensitive совпадения адреса
-    let items = build_items(&devices, "aabbccddee01", "1MORE SonoFlow", true, "12:34:56", Language::English);
+    let items = build_items(&devices, "aabbccddee01", "1MORE SonoFlow", true, Language::English);
 
     unsafe {
         let screen = GetDC(None);
