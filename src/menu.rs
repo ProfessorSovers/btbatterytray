@@ -29,6 +29,7 @@ use windows::Win32::Graphics::Gdi::{
     CreateFontW, CreatePen, CreateSolidBrush, DeleteDC, DeleteObject, DIB_RGB_COLORS, DrawTextW,
     DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, Ellipse, EndPaint, FillRect, GetDC, GetStockObject,
     GetTextExtentPoint32W, HBRUSH, HDC, HFONT, InvalidateRect, LineTo, MoveToEx, NULL_BRUSH,
+    NULL_PEN,
     PAINTSTRUCT, Polygon, PS_SOLID, Rectangle, ReleaseDC, RGBQUAD, SelectObject, SetBkMode, SetTextColor,
     TRANSPARENT, UpdateWindow,
 };
@@ -577,15 +578,20 @@ unsafe fn draw_check(hdc: HDC, cx: i32, cy: i32, checked: bool, color: COLORREF)
 }
 
 /// Заполненный треугольник, направленный влево — в сторону дочернего меню.
+/// Обводка явно отключается (NULL_PEN): `Polygon` рисует контур ТЕКУЩИМ пером,
+/// а в этот момент выбран перо рамки (другой цвет) — оно обводило заливку и
+/// «съедало» фигуру (вид поеденной моли). Геометрия симметрична центру.
 unsafe fn draw_arrow(hdc: HDC, cx: i32, cy: i32, color: COLORREF) {
     let brush = CreateSolidBrush(color);
     let old_brush = SelectObject(hdc, brush);
+    let old_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
     let points = [
-        POINT { x: cx + 3, y: cy - 5 },
+        POINT { x: cx + 3, y: cy - 4 },
         POINT { x: cx - 3, y: cy },
-        POINT { x: cx + 3, y: cy + 5 },
+        POINT { x: cx + 3, y: cy + 4 },
     ];
     let _ = Polygon(hdc, &points);
+    let _ = SelectObject(hdc, old_pen);
     let _ = SelectObject(hdc, old_brush);
     let _ = DeleteObject(brush);
 }
