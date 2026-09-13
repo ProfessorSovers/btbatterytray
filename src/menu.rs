@@ -1380,5 +1380,6 @@ pub fn render_test() {
     unsafe {
         render_items_to_bmp(&main, "menu_test.bmp", Theme::Dark);
         render_items_to_bmp(&submenu, "submenu_test.bmp", Theme::Dark);
+        render_items_to_bmp(&main, "menu_light_test.bmp", Theme::Light);
     }
 }
