@@ -23,6 +23,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     RegisterClassW, TranslateMessage, HCURSOR, HICON, HMENU, WNDCLASSW, WM_APP, WM_CONTEXTMENU,
     WM_DESTROY, WM_LBUTTONUP, WM_RBUTTONUP, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, CW_USEDEFAULT,
 };
+use std::path::Path;
+
 use winreg::enums::*;
 use winreg::RegKey;
 
@@ -147,11 +149,20 @@ fn save_target_name(name: &str) {
     }
 }
 
-fn autostart_enabled() -> bool {
+/// Значение автозапуска из реестра как есть (может указывать на несуществующий файл).
+fn autostart_entry() -> Option<String> {
     RegKey::predef(HKEY_CURRENT_USER)
         .open_subkey(RUN_KEY)
-        .and_then(|k| k.get_value::<String, _>(RUN_VALUE))
-        .is_ok()
+        .ok()
+        .and_then(|k| k.get_value::<String, _>(RUN_VALUE).ok())
+}
+
+/// Автозапуск включён по-настоящему: запись есть И файл по этому пути существует.
+/// Иначе галочка в меню врёт (запись есть, а запускать нечего).
+fn autostart_enabled() -> bool {
+    autostart_entry()
+        .map(|v| Path::new(v.trim_matches('"')).is_file())
+        .unwrap_or(false)
 }
 
 fn toggle_autostart() {
@@ -161,6 +172,29 @@ fn toggle_autostart() {
             let _ = k.delete_value(RUN_VALUE);
         } else {
             let _ = k.set_value(RUN_VALUE, &format!("\"{}\"", exe.display()));
+        }
+    }
+}
+
+/// Починка автозапуска: если запись есть, но путь мёртвый (файла нет — приложение
+/// переехало или его переименовали), переписываем путь на текущий exe. Живой путь
+/// не трогаем: иначе запуск копии из другого места угонял бы автозапуск у установки.
+fn heal_autostart() {
+    let value = match autostart_entry() {
+        Some(v) => v,
+        None => return,
+    };
+    let old = value.trim_matches('"').to_string();
+    if Path::new(&old).is_file() {
+        return;
+    }
+    let exe = std::env::current_exe().unwrap_or_default();
+    if let Ok((k, _)) = RegKey::predef(HKEY_CURRENT_USER).create_subkey(RUN_KEY) {
+        if k.set_value(RUN_VALUE, &format!("\"{}\"", exe.display())).is_ok() {
+            log_line(&format!(
+                "autostart: путь {:?} не найден, починен на {:?}",
+                old, exe
+            ));
         }
     }
 }
@@ -486,6 +520,10 @@ pub fn acquire_single_instance() -> bool {
 }
 
 pub fn run(demo_level: Option<u8>) {
+    // автозапуск мог остаться с мёртвым путём (приложение переехало) — чиним
+    if demo_level.is_none() {
+        heal_autostart();
+    }
     unsafe {
         let hinstance = match GetModuleHandleW(None) {
             Ok(h) => h,
