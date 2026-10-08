@@ -19,20 +19,41 @@ fn main() {
     let out = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR не задан"));
     let target = env::var("TARGET").unwrap_or_default();
 
+    // Номер версии — из `version` в Cargo.toml (один источник истины).
+    // Заголовок, а не -D: строковый define через -D не доезжает как литерал.
+    let header = out.join("version.h");
+    if let Err(e) = std::fs::write(&header, version_header()) {
+        println!("cargo:warning=не смог записать version.h: {}", e);
+    }
+
     if target.contains("msvc") {
         if let Some(rc) = pick(&[("rc.exe", "/?"), ("rc", "/?")]) {
             let res = out.join("app.res");
-            if build(&rc, &["/nologo", "/fo", &path(&res), "assets/app.rc"], &res) {
+            let args = vec![
+                "/nologo".to_string(),
+                "/i".to_string(),
+                path(&out),
+                "/i".to_string(),
+                "assets".to_string(),
+                "/fo".to_string(),
+                path(&res),
+                "assets/app.rc".to_string(),
+            ];
+            if build(&rc, &args, &res) {
                 return;
             }
         }
     } else if let Some(windres) = windres() {
         let obj = out.join("app_icon.o");
-        if build(
-            &windres,
-            &["--include-dir", "assets", "assets/app.rc", &path(&obj)],
-            &obj,
-        ) {
+        let args = vec![
+            "--include-dir".to_string(),
+            path(&out),
+            "--include-dir".to_string(),
+            "assets".to_string(),
+            "assets/app.rc".to_string(),
+            path(&obj),
+        ];
+        if build(&windres, &args, &obj) {
             return;
         }
     }
@@ -41,6 +62,25 @@ fn main() {
         "cargo:warning=компилятор ресурсов не найден (rc.exe или windres) — \
          exe собирается БЕЗ иконки"
     );
+}
+
+/// Содержимое `version.h` для VERSIONINFO в `assets/app.rc`.
+fn version_header() -> String {
+    let version = env::var("CARGO_PKG_VERSION").unwrap_or_default();
+    let mut nums = version.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
+    let (major, minor, patch) = (
+        nums.next().unwrap_or(0),
+        nums.next().unwrap_or(0),
+        nums.next().unwrap_or(0),
+    );
+    format!(
+        "// Сгенерировано build.rs из Cargo.toml — не редактировать.\n\
+         #define VER_MAJOR {}\n\
+         #define VER_MINOR {}\n\
+         #define VER_PATCH {}\n\
+         #define VER_STR \"{}\"\n",
+        major, minor, patch, version
+    )
 }
 
 /// windres: сначала переменная окружения (её удобно прописать в локальном
@@ -73,7 +113,7 @@ fn runs(cmd: &str, flag: &str) -> bool {
 }
 
 /// Компилирует ресурсы и просит линкер подхватить результат.
-fn build(compiler: &str, args: &[&str], artifact: &Path) -> bool {
+fn build(compiler: &str, args: &[String], artifact: &Path) -> bool {
     let mut cmd = Command::new(compiler);
     cmd.args(args);
 
