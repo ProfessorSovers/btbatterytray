@@ -280,6 +280,19 @@ const FG_GRACE_MS: i64 = 350; // не закрывать сразу при от�
 /// закрытие дочернего окна терялось, и меню висело, перехватывая мышь.
 static GROUP_CLOSED: AtomicBool = AtomicBool::new(false);
 static GROUP_PARENT: AtomicIsize = AtomicIsize::new(0);
+// Момент показа попапа (мс). Меню появляется прямо под курсором и прижимается
+// к краю экрана, поэтому второй клик двойного щелчка по иконке попадает в пункт
+// под курсором (нижний — «Выход»). Клик сразу после показа игнорируется.
+static OPENED_AT: AtomicIsize = AtomicIsize::new(0);
+/// Сколько миллисекунд после показа меню клики считаются случайными.
+const CLICK_GRACE_MS: i64 = 250;
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
 
 /// Окно меню взяло/отдало фокус (`EVENT_SYSTEM_FOREGROUND`). Окна меню —
 /// `WS_EX_NOACTIVATE`, поэтому foreground уходит в другое приложение при
@@ -944,6 +957,16 @@ unsafe extern "system" fn menu_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
             LRESULT(0)
         }
         WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN => {
+            // Клик сразу после показа меню — это второй клик двойного щелчка по иконке:
+            // пункт под курсором не выбираем (иначе случайно срабатывал «Выход»).
+            if (now_ms() - OPENED_AT.load(Ordering::SeqCst) as i64) < CLICK_GRACE_MS {
+                return LRESULT(0);
+            }
+            // Правая и средняя кнопка в меню никогда не активируют пункт — только закрывают.
+            if matches!(msg, WM_RBUTTONDOWN | WM_MBUTTONDOWN) {
+                close_menu(hwnd, state, MenuAction::None);
+                return LRESULT(0);
+            }
             let (x, y) = client_pos(lparam);
             if x < 0 || y < 0 || x >= state.width || y >= state.height {
                 // клик вне окна — закрыть без выбора
@@ -1100,6 +1123,7 @@ unsafe fn create_popup(items: Vec<MenuItem>, x: i32, y: i32, theme: Theme) -> Po
     // создание дочернего popup не должно перезаписывать HWND родителя.
     let _ = ShowWindow(hwnd, SW_SHOWNA);
         let _ = UpdateWindow(hwnd);
+    OPENED_AT.store(now_ms() as isize, Ordering::SeqCst);
 
     PopupResult {
         action: MenuAction::None,
